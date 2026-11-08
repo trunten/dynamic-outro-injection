@@ -1,5 +1,5 @@
 """Runtime configuration. Never log credentials or persist them in Git."""
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import os
 from urllib.parse import urlsplit
 
@@ -19,7 +19,7 @@ class Settings:
     bucket: str
     endpoint: str
     key_id: str
-    secret: str
+    secret: str = field(repr=False)
     public_base_url: str
     max_mirrors: int
     max_outro_bytes: int
@@ -29,6 +29,7 @@ class Settings:
     max_generations_per_day: int
     feed_refresh_seconds: int
     cache_ttl_days: int
+    admin_password: str = field(default="", repr=False)
 
     @property
     def storage_ready(self) -> bool:
@@ -58,4 +59,5 @@ def load_settings() -> Settings:
         max_generations_per_day=_positive_int("MAX_GENERATIONS_PER_DAY", 20),
         feed_refresh_seconds=_positive_int("FEED_REFRESH_SECONDS", 900, minimum=60),
         cache_ttl_days=_positive_int("CACHE_TTL_DAYS", 14),
+        admin_password=os.getenv("ADMIN_PASSWORD", ""),
     )

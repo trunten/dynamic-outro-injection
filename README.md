@@ -27,6 +27,7 @@ Hostless runs one FastAPI web app and FFmpeg in a Docker container. Backblaze B2
    | `B2_ENDPOINT` | Backblaze S3 endpoint, e.g. `https://s3.eu-central-003.backblazeb2.com` |
    | `B2_KEY_ID` | Bucket-scoped B2 key ID |
    | `B2_APPLICATION_KEY` | Secret bucket-scoped B2 application key |
+   | `ADMIN_PASSWORD` | Strong administrator password for the private `/admin` dashboard |
 
 6. After Hostless assigns a public HTTPS domain, set optional `PUBLIC_BASE_URL=https://your-app-hostname` to ensure links use the canonical origin. You can also set it before creating your first mirror if you know the URL.
 7. Keep the Hostless health check as TCP initially; `/health` is also available for HTTP checks.
@@ -42,6 +43,23 @@ The website includes a **Default (ATP End Theme)** choice, selected automaticall
 3. The web page checks `/api/default-outro` and automatically enables the default selection when B2 can read that file. No extra Hostless environment variables or deploy changes are required.
 
 The file is deliberately **not committed to the public GitHub repository**. Only publish and share the default audio in a public service if you have the necessary rights to use and redistribute it. Users can still choose **Upload my own outro**, which stores a per-mirror file. Existing custom-outro mirrors remain compatible. Deleting a default mirror never deletes the shared `atp.mp3`.
+
+## Administrator dashboard
+
+Set a strong `ADMIN_PASSWORD` environment variable on the Hostless app (keep it write-only/secret if available) and redeploy. Visit **`https://your-app-hostname/admin`**, sign in, and review:
+
+- Total active feeds, mirrors accessed in the last 30 days, RSS requests, audio requests, monthly outgoing MP3 bytes and deleted-feed history.
+- The most frequently mirrored original podcasts (grouped by original RSS URL), including **active plus deleted** mirrors and default/custom outro splits.
+- Current mirrors: creation date, episode count, ever-generated count, last RSS/audio request, and a confirmation-protected **administrator delete** action (no creator deletion key needed).
+- Deleted mirrors: title, source hostname, creation/deletion dates, which type of outro was used, and request counts. The actual episode audio, source URL, personal deletion key and full private feed record are **not** retained in the deletion history.
+
+The dashboard is private: `/api/admin/*` requires a signed, secure, HTTP-only session cookie that expires after eight hours; administrator delete also requires a custom request header. Login failures are rate limited. Changing `ADMIN_PASSWORD` invalidates existing sessions. Don't reuse a password from another service.
+
+Activity metrics are aggregated in private B2 objects and written in three-minute batches; a crash or sudden restart can omit a few recent requests. **Audio requests are not unique listeners or confirmed plays**: podcast apps can prefetch or request byte ranges. "Used in 30 days" includes RSS checks. The monthly bandwidth figure comes from the app's existing approximate egress budget, not the provider's invoice. The deleted-feed archive starts with this update and **cannot recover feeds deleted before it was installed**. Archived records persist in B2 under `system/deleted/` even after their feed and cache objects have been deleted. A failed cleanup is shown as *pending* instead of pretending deletion succeeded.
+
+### Persistent storage and operational limits
+
+Activity counters are batched into a single `system/activity.json` in the same **private** Backblaze bucket; no additional database or volume is required. This creates metadata object versions over time. Configure Backblaze lifecycle rules to expire *old versions* without deleting the current metadata or deleted-feed history. The app still assumes **one Hostless instance** for its in-process counter aggregation and cache locks; adding replicas would require distributed coordination.
 
 ## Local development
 
@@ -84,6 +102,10 @@ This is a **small public beta**, not yet a hardened multi-tenant production serv
 - `app/security.py` - bounded HTTP fetching with DNS-rebinding-resistant URL resolution.
 - `app/storage.py` - private Backblaze B2 S3 integration and cache cleanup.
 - `app/static/index.html` - standalone responsive browser interface.
+- `app/static/admin.html` - responsive, password-protected administrator dashboard UI.
+- `app/admin_auth.py` - signed administrator sessions and CSRF action checks.
+- `app/admin_data.py` - private active/deleted mirror summaries and trend grouping.
+- `app/activity.py` - batched Backblaze request counters and last-activity timestamps.
 - `tests/` - RSS, HTTP, security and audio processing tests.
 
 ## Privacy

@@ -5,6 +5,7 @@ ideally an edge rate limiter before it is promoted beyond limited testing.
 """
 import asyncio
 from collections import defaultdict, deque
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 import hashlib
 import hmac
@@ -19,10 +20,14 @@ import uuid
 from urllib.parse import urlsplit
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, Response, StreamingResponse, JSONResponse
 from botocore.exceptions import ClientError
 
 from .audio import AudioError, append_outro, probe_audio
+from .activity import ActivityTracker
+from .admin_auth import (COOKIE_NAME, COOKIE_PATH, SESSION_TTL_SECONDS,
+                         new_session, password_matches, require_admin, require_admin_action)
+from .admin_data import overview as admin_overview, source_host, source_id
 from .config import load_settings
 from .rss import InvalidFeed, mirror_feed
 from .security import UnsafeSource, download_episode, fetch_feed, validate_source_url
@@ -31,7 +36,25 @@ from .storage import MissingObject, Storage
 logger = logging.getLogger("dynamic_outro")
 logging.basicConfig(level=logging.INFO)
 settings = load_settings()
-app = FastAPI(title="Dynamic Outro Injection", docs_url=None, redoc_url=None)
+@asynccontextmanager
+async def lifespan(_app):
+    task = asyncio.create_task(_activity_worker())
+    try:
+        yield
+    finally:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        if settings.storage_ready and activity_tracker.pending:
+            try:
+                await activity_tracker.flush(storage())
+            except Exception:
+                logger.warning("Failed to flush activity on shutdown")
+
+
+app = FastAPI(title="Dynamic Outro Injection", docs_url=None, redoc_url=None, lifespan=lifespan)
 
 MIRROR_RE = re.compile(r"^[a-f0-9]{32}$")
 EPISODE_RE = re.compile(r"^[a-f0-9]{24}$")
@@ -46,6 +69,8 @@ egress_gate = asyncio.Lock()
 recent_feed_checks: dict[str, float] = {}
 creation_times: dict[str, deque] = defaultdict(deque)
 deletion_times: dict[str, deque] = defaultdict(deque)
+admin_login_times: dict[str, deque] = defaultdict(deque)
+activity_tracker = ActivityTracker()
 generations_today: dict[str, int] = defaultdict(int)
 storage_instance: Storage | None = None
 
@@ -121,9 +146,25 @@ async def home():
     return FileResponse(Path(__file__).parent / "static" / "index.html", media_type="text/html")
 
 
+@app.get("/admin", include_in_schema=False)
+async def admin_home():
+    return FileResponse(Path(__file__).parent / "static" / "admin.html",
+                        media_type="text/html", headers={"Cache-Control": "no-store"})
+
+
 @app.get("/health")
 async def health():
     return {"ok": True, "storage_configured": settings.storage_ready}
+
+
+async def _activity_worker():
+    while True:
+        await asyncio.sleep(180)
+        if settings.storage_ready and activity_tracker.pending:
+            try:
+                await activity_tracker.flush(storage())
+            except Exception:
+                logger.warning("Activity flush failed; will retry")
 
 
 @app.get("/api/default-outro")
@@ -309,6 +350,7 @@ async def get_mirror_feed(mid: str):
         if isinstance(exc, HTTPException):
             raise
         raise _http_error(exc) from exc
+    activity_tracker.record(mid, "rss")
     return Response(content=result, media_type="application/rss+xml",
                     headers={"Cache-Control": "public, max-age=300"})
 
@@ -331,62 +373,64 @@ async def _ensure_generated(mid: str, eid: str):
         return output_key, found
 
     async with episode_locks[f"{mid}:{eid}"]:
-        found = await s3(b2.head, output_key)
-        if found is not None:
-            return output_key, found
-        async with generation_gate:
-            day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-            if generations_today[day] >= settings.max_generations_per_day:
-                raise HTTPException(429, "Daily audio generation limit reached. Try again tomorrow")
-            meta = await _meta(mid)
-            index = await _index(mid)
-            episode = index["episodes"].get(eid)
-            if episode is None:
-                raise HTTPException(404, "Episode not found in the mirrored feed")
-            generations_today[day] += 1
-            with tempfile.TemporaryDirectory(prefix="episode-", dir="/tmp") as directory:
-                src_path = os.path.join(directory, "original.audio")
-                outro_path = os.path.join(directory, "outro.mp3")
-                output_path = os.path.join(directory, "finished.mp3")
-                try:
-                    await download_episode(episode["url"], src_path, settings.max_source_bytes)
-                    source_details = await asyncio.to_thread(probe_audio, src_path)
-                    if source_details["duration"] > 6 * 3600:
-                        raise AudioError("Episodes longer than six hours are not supported")
-                    # Pre-existing mirrors have no outro_key: keep their original custom file.
-                    outro_key = meta.get("outro_key") or _prefix(mid) + "outro.mp3"
-                    await s3(b2.download_file, outro_key, outro_path)
-                    method = await append_outro(src_path, outro_path, output_path)
-                    output_size = os.path.getsize(output_path)
-                    if not output_size:
-                        raise AudioError("FFmpeg produced an empty audio file")
-                    if output_size > settings.max_cache_bytes:
-                        raise AudioError("Processed episode is too large for this cache")
-                    # Remove old audio before storing the new file. Versions are
-                    # permanently removed, not merely marked deleted.
-                    await s3(b2.expire_cache, "cache/", settings.cache_ttl_days,
-                             settings.max_cache_bytes, output_size)
-                    await s3(b2.upload_file, output_key, output_path)
-                    logger.info("Generated %s/%s via %s (%d bytes)", mid, eid, method, output_size)
-                except Exception as exc:
-                    if isinstance(exc, HTTPException):
-                        raise
-                    raise _http_error(exc) from exc
+        async with mirror_locks[mid]:
             found = await s3(b2.head, output_key)
-            # Cache now works even if feed metadata update is interrupted.
-            try:
-                index["episodes"][eid]["cached_size"] = output_size
-                raw = await s3(b2.get_bytes, _prefix(mid) + "original.xml", 2 * 1024 * 1024 + 1024)
-                rendered, index, _ = mirror_feed(raw, mid,
-                    settings.public_base_url or meta["base_url"], meta["outro_bytes"],
-                    meta["outro_seconds"], index)
-                await s3(b2.put_json, _prefix(mid) + "episodes.json", index)
-                await s3(b2.put_bytes, _prefix(mid) + "feed.xml", rendered, "application/rss+xml")
-            except Exception:
-                logger.exception("Generated episode saved, but failed to update RSS length")
-            if found is None:
-                raise HTTPException(502, "The processed episode was not saved correctly")
-            return output_key, found
+            if found is not None:
+                return output_key, found
+            async with generation_gate:
+                day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+                if generations_today[day] >= settings.max_generations_per_day:
+                    raise HTTPException(429, "Daily audio generation limit reached. Try again tomorrow")
+                meta = await _meta(mid)
+                index = await _index(mid)
+                episode = index["episodes"].get(eid)
+                if episode is None:
+                    raise HTTPException(404, "Episode not found in the mirrored feed")
+                generations_today[day] += 1
+                with tempfile.TemporaryDirectory(prefix="episode-", dir="/tmp") as directory:
+                    src_path = os.path.join(directory, "original.audio")
+                    outro_path = os.path.join(directory, "outro.mp3")
+                    output_path = os.path.join(directory, "finished.mp3")
+                    try:
+                        await download_episode(episode["url"], src_path, settings.max_source_bytes)
+                        source_details = await asyncio.to_thread(probe_audio, src_path)
+                        if source_details["duration"] > 6 * 3600:
+                            raise AudioError("Episodes longer than six hours are not supported")
+                        # Pre-existing mirrors have no outro_key: keep their original custom file.
+                        outro_key = meta.get("outro_key") or _prefix(mid) + "outro.mp3"
+                        await s3(b2.download_file, outro_key, outro_path)
+                        method = await append_outro(src_path, outro_path, output_path)
+                        output_size = os.path.getsize(output_path)
+                        if not output_size:
+                            raise AudioError("FFmpeg produced an empty audio file")
+                        if output_size > settings.max_cache_bytes:
+                            raise AudioError("Processed episode is too large for this cache")
+                        # Remove old audio before storing the new file. Versions are
+                        # permanently removed, not merely marked deleted.
+                        await s3(b2.expire_cache, "cache/", settings.cache_ttl_days,
+                                 settings.max_cache_bytes, output_size)
+                        await s3(b2.upload_file, output_key, output_path)
+                        activity_tracker.record(mid, "generation")
+                        logger.info("Generated %s/%s via %s (%d bytes)", mid, eid, method, output_size)
+                    except Exception as exc:
+                        if isinstance(exc, HTTPException):
+                            raise
+                        raise _http_error(exc) from exc
+                found = await s3(b2.head, output_key)
+                # Cache now works even if feed metadata update is interrupted.
+                try:
+                    index["episodes"][eid]["cached_size"] = output_size
+                    raw = await s3(b2.get_bytes, _prefix(mid) + "original.xml", 2 * 1024 * 1024 + 1024)
+                    rendered, index, _ = mirror_feed(raw, mid,
+                        settings.public_base_url or meta["base_url"], meta["outro_bytes"],
+                        meta["outro_seconds"], index)
+                    await s3(b2.put_json, _prefix(mid) + "episodes.json", index)
+                    await s3(b2.put_bytes, _prefix(mid) + "feed.xml", rendered, "application/rss+xml")
+                except Exception:
+                    logger.exception("Generated episode saved, but failed to update RSS length")
+                if found is None:
+                    raise HTTPException(502, "The processed episode was not saved correctly")
+                return output_key, found
 
 
 def _range_header(header: str | None, total: int) -> tuple[str | None, int, dict]:
@@ -447,6 +491,7 @@ async def episode_audio(mid: str, eid: str, request: Request):
         if request.method == "HEAD":
             return Response(status_code=status, headers=headers)
         await _reserve_monthly_egress(int(headers["Content-Length"]))
+        activity_tracker.record(mid, "audio", int(headers["Content-Length"]))
         return StreamingResponse(storage().stream(key, byte_range), status_code=status,
                                  media_type="audio/mpeg", headers=headers)
     except HTTPException:
@@ -502,6 +547,51 @@ async def delete_feed_by_key(request: Request):
     raise _invalid_deletion_key()
 
 
+async def _delete_mirror_with_history(mid: str, actor: str) -> dict:
+    """Archive nonsecret show metadata before permanently deleting B2 objects."""
+    _id(mid, MIRROR_RE)
+    b2 = storage()
+    async with mirror_locks[mid]:
+        meta = await _meta(mid)
+        index = await _index(mid)
+        try:
+            await activity_tracker.flush(b2, mid)
+            metrics = await activity_tracker.read(b2, mid)
+            record = {
+                "id": mid,
+                "title": str(meta.get("title", "Untitled"))[:160],
+                "source_id": source_id(meta.get("feed_url", "")),
+                "source_host": source_host(meta.get("feed_url", "")),
+                "created_at": meta.get("created_at"),
+                "deleted_at": datetime.now(timezone.utc).isoformat(),
+                "deleted_by": actor,
+                "outro_choice": meta.get("outro_choice", "custom"),
+                "episode_count": len(index.get("episodes") or {}),
+                "generated_episode_count": sum(1 for e in (index.get("episodes") or {}).values()
+                                               if e.get("cached_size", 0) > 0),
+                "activity": metrics,
+                "last_activity_at": max(metrics.get("last_feed_at") or "", metrics.get("last_audio_at") or "") or None,
+                "status": "pending",
+            }
+            history_key = f"system/deleted/{mid}.json"
+            # If cleanup fails after starting, admins can see a pending entry;
+            # the original feed is not misrepresented as fully deleted.
+            await s3(b2.put_json, history_key, record)
+            for prefix in (_prefix(mid), f"cache/{mid}/"):
+                entries = await s3(b2.list_current, prefix)
+                # Delete metadata last. Old versions are permanently removed.
+                for entry in sorted(entries, key=lambda e: e["Key"] == _meta_key(mid)):
+                    await s3(b2.delete_versions, entry["Key"])
+            await activity_tracker.purge(b2, mid)
+            record["status"] = "deleted"
+            await s3(b2.put_json, history_key, record)
+        except Exception as exc:
+            raise _http_error(exc) from exc
+    recent_feed_checks.pop(mid, None)
+    activity_tracker.pending.pop(mid, None)
+    return {"deleted": True}
+
+
 @app.delete("/api/mirrors/{mid}")
 async def delete_mirror(mid: str, request: Request):
     _id(mid, MIRROR_RE)
@@ -510,14 +600,77 @@ async def delete_mirror(mid: str, request: Request):
     hashed = hashlib.sha256(provided.encode()).hexdigest()
     if not provided or not hmac.compare_digest(hashed, meta["manage_hash"]):
         raise HTTPException(403, "Invalid management token")
-    b2 = storage()
+    return await _delete_mirror_with_history(mid, "creator")
+
+
+def _limit_admin_login(request: Request) -> None:
+    ip = request.client.host if request.client else "unknown"
+    now = time.monotonic()
+    attempts = admin_login_times[ip]
+    while attempts and attempts[0] < now - 900:
+        attempts.popleft()
+    if len(attempts) >= 10:
+        raise HTTPException(429, "Too many login attempts. Please retry later")
+    attempts.append(now)
+
+
+@app.post("/api/admin/login")
+async def admin_login(request: Request):
+    if not settings.admin_password:
+        raise HTTPException(503, "Admin password has not been configured")
+    if request.headers.get("x-admin-request") != "1":
+        raise HTTPException(403, "Invalid administrator request")
+    _limit_admin_login(request)
+    if int(request.headers.get("content-length", "0") or "0") > 4096:
+        raise HTTPException(413, "Login request is too large")
     try:
-        for prefix in (_prefix(mid), f"cache/{mid}/"):
-            entries = await s3(b2.list_current, prefix)
-            # Delete metadata last. Backblaze file versions are permanent-deleted.
-            for entry in sorted(entries, key=lambda e: e["Key"] == _meta_key(mid)):
-                await s3(b2.delete_versions, entry["Key"])
+        import json
+        body = bytearray()
+        async for piece in request.stream():
+            body.extend(piece)
+            if len(body) > 4096:
+                raise HTTPException(413, "Login request is too large")
+        payload = json.loads(body)
+        password = payload.get("password") if isinstance(payload, dict) else None
+    except (ValueError, TypeError):
+        password = None
+    if not password_matches(password, settings.admin_password):
+        raise HTTPException(401, "Incorrect administrator password")
+    # Correct logins do not consume failed-login rate limit slots.
+    admin_login_times[(request.client.host if request.client else "unknown")].clear()
+    response = JSONResponse({"authenticated": True}, headers={"Cache-Control": "no-store"})
+    response.set_cookie(COOKIE_NAME, new_session(settings.admin_password),
+                        max_age=SESSION_TTL_SECONDS, path=COOKIE_PATH,
+                        secure=True, httponly=True, samesite="strict")
+    return response
+
+
+@app.get("/api/admin/session")
+async def admin_session(request: Request):
+    require_admin(request, settings.admin_password)
+    return JSONResponse({"authenticated": True}, headers={"Cache-Control": "no-store"})
+
+
+@app.post("/api/admin/logout")
+async def admin_logout(request: Request):
+    require_admin_action(request, settings.admin_password)
+    response = JSONResponse({"authenticated": False}, headers={"Cache-Control": "no-store"})
+    response.delete_cookie(COOKIE_NAME, path=COOKIE_PATH, secure=True, httponly=True, samesite="strict")
+    return response
+
+
+@app.get("/api/admin/overview")
+async def admin_stats(request: Request):
+    require_admin(request, settings.admin_password)
+    try:
+        report = await admin_overview(storage(), activity_tracker, settings.max_mirrors)
     except Exception as exc:
         raise _http_error(exc) from exc
-    recent_feed_checks.pop(mid, None)
-    return {"deleted": True}
+    return JSONResponse(report, headers={"Cache-Control": "no-store"})
+
+
+@app.delete("/api/admin/mirrors/{mid}")
+async def admin_delete_mirror(mid: str, request: Request):
+    require_admin_action(request, settings.admin_password)
+    _id(mid, MIRROR_RE)
+    return await _delete_mirror_with_history(mid, "administrator")

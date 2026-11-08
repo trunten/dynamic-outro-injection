@@ -74,6 +74,8 @@ def fixture_app(monkeypatch):
     main.recent_feed_checks.clear()
     main.creation_times.clear()
     main.deletion_times.clear()
+    main.admin_login_times.clear()
+    main.activity_tracker = main.ActivityTracker()
     main.generations_today.clear()
 
     async def feed(url, *args):
@@ -135,7 +137,10 @@ def test_delete_requires_management_token(fixture_app):
     mid = result["id"]
     assert client.delete(f"/api/mirrors/{mid}", headers={"x-manage-token": "bad"}).status_code == 403
     assert client.delete(f"/api/mirrors/{mid}", headers={"x-manage-token": result["manage_token"]}).status_code == 200
-    assert not fake.data
+    assert not any(key.startswith(("mirrors/", "cache/")) for key in fake.data)
+    history = fake.get_json(f"system/deleted/{mid}.json")
+    assert history["status"] == "deleted" and history["deleted_by"] == "creator"
+    assert "manage_hash" not in history and "feed_url" not in history
     assert client.get(f"/feed/{mid}.xml").status_code == 404
 
 
