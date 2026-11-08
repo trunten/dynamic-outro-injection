@@ -35,12 +35,17 @@ app = FastAPI(title="Dynamic Outro Injection", docs_url=None, redoc_url=None)
 
 MIRROR_RE = re.compile(r"^[a-f0-9]{32}$")
 EPISODE_RE = re.compile(r"^[a-f0-9]{24}$")
+# New keys carry the mirror ID, so its owner can delete it by key alone.
+# Old keys had no ID; the management endpoint still supports them.
+KEYED_TOKEN_RE = re.compile(r"^(?P<mid>[a-f0-9]{32})\.[A-Za-z0-9_-]{32,90}$")
+LEGACY_TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{32,128}$")
 mirror_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 episode_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 generation_gate = asyncio.Semaphore(1)
 egress_gate = asyncio.Lock()
 recent_feed_checks: dict[str, float] = {}
 creation_times: dict[str, deque] = defaultdict(deque)
+deletion_times: dict[str, deque] = defaultdict(deque)
 generations_today: dict[str, int] = defaultdict(int)
 storage_instance: Storage | None = None
 
@@ -134,6 +139,22 @@ async def default_outro_status():
     return {"label": DEFAULT_OUTRO_LABEL, "available": available}
 
 
+def _limit_deletion(request: Request) -> None:
+    """Avoid repeatedly scanning private B2 records for guessed legacy keys."""
+    ip = request.client.host if request.client else "unknown"
+    now = time.monotonic()
+    attempts = deletion_times[ip]
+    while attempts and attempts[0] < now - 900:
+        attempts.popleft()
+    if len(attempts) >= 12:
+        raise HTTPException(429, "Too many deletion attempts. Please try again later")
+    attempts.append(now)
+
+
+def _invalid_deletion_key() -> HTTPException:
+    return HTTPException(403, "Invalid deletion key. Check the key you saved when creating the feed")
+
+
 def _limit_creation(request: Request) -> None:
     ip = request.client.host if request.client else "unknown"
     now = time.monotonic()
@@ -214,7 +235,9 @@ async def create_mirror(request: Request):
             mid = uuid.uuid4().hex
             base = _base_url(request)
             rendered, index, title = mirror_feed(raw, mid, base, size, round(info["duration"]))
-            token = secrets.token_urlsafe(32)
+            # The mirror ID is public, but the appended random secret is not.
+            # Storing only its hash keeps an exposed bucket record from revealing the key.
+            token = f"{mid}.{secrets.token_urlsafe(32)}"
             prefix = _prefix(mid)
             meta = {
                 "feed_url": feed_url,
@@ -430,6 +453,53 @@ async def episode_audio(mid: str, eid: str, request: Request):
         raise
     except Exception as exc:
         raise _http_error(exc) from exc
+
+
+@app.delete("/api/manage/feed")
+async def delete_feed_by_key(request: Request):
+    """Delete a mirror with only its one-time key, including pre-v2 keys."""
+    _limit_deletion(request)
+    token = request.headers.get("x-manage-token", "").strip()
+    hashed = hashlib.sha256(token.encode()).hexdigest()
+    match = KEYED_TOKEN_RE.fullmatch(token)
+    if match:
+        # New keys contain the mirror ID: one private metadata read.
+        mid = match.group("mid")
+        try:
+            meta = await _meta(mid)
+        except HTTPException as exc:
+            if exc.status_code == 404:
+                raise _invalid_deletion_key() from exc
+            raise
+        if not hmac.compare_digest(hashed, meta.get("manage_hash", "")):
+            raise _invalid_deletion_key()
+        return await delete_mirror(mid, request)
+
+    if not LEGACY_TOKEN_RE.fullmatch(token):
+        raise _invalid_deletion_key()
+
+    # Old random-only keys have no mirror ID. Do a bounded lookup across
+    # our few existing mirrors so previously issued keys remain usable.
+    b2 = storage()
+    try:
+        records = await s3(b2.list_current, "mirrors/")
+        meta_keys = sorted(
+            r["Key"] for r in records if re.fullmatch(r"mirrors/[a-f0-9]{32}/meta\.json", r["Key"])
+        )
+        if len(meta_keys) > settings.max_mirrors:
+            raise HTTPException(503, "Too many mirrors for legacy key lookup")
+        for key in meta_keys:
+            try:
+                meta = await s3(b2.get_json, key)
+            except MissingObject:
+                continue  # A mirror may have been deleted during this lookup.
+            if hmac.compare_digest(hashed, meta.get("manage_hash", "")):
+                return await delete_mirror(key.split("/")[1], request)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise _http_error(exc) from exc
+    raise _invalid_deletion_key()
 
 
 @app.delete("/api/mirrors/{mid}")

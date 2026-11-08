@@ -69,6 +69,17 @@
     .manage details { margin-top:7px }
     .manage summary { cursor:pointer; font-weight:700 }
     .manage button { margin-top:10px }
+    .manage h4 { font-size:.91rem; color:var(--ink); margin:0 0 5px }
+    .delete-existing { border-top:1px solid var(--line); padding-top:23px; margin-top:27px }
+    .delete-existing h3 { font-size:1.05rem; letter-spacing:-.025em; margin:0 0 6px }
+    .delete-existing p { color:var(--muted); font-size:.83rem; margin:0 0 8px }
+    .delete-existing .field { margin-top:14px }
+    .delete-existing .primary-delete { background:#fbe9e6; color:#8b2926; padding:12px 19px; margin-top:13px; width:100%; border:1px solid #f2b8ae }
+    .delete-existing .primary-delete:hover:not(:disabled) { background:#fbd8d1 }
+    .delete-existing .primary-delete:disabled { opacity:.65; cursor:wait }
+    .success-note { color:#176b4d; background:#eefaf4; border:1px solid #b7dfcb; border-radius:10px; padding:12px; margin-top:14px; font-size:.85rem }
+    .delete-existing .link-row input { min-width:0; flex:1 }
+    .delete-existing .link-row button { flex-shrink:0 }
     footer { font-size:.77rem; color:#7a8a90; text-align:center; margin-top:36px }
     @media (max-width:760px) { .top{min-height:330px;padding-bottom:105px} .layout{grid-template-columns:1fr} .panel{padding:22px} .eyebrow{margin-top:46px} .aside{order:2} }
     @media (prefers-reduced-motion:reduce){*{scroll-behavior:auto!important;transition:none!important}}
@@ -123,7 +134,22 @@
         <div class="link-row"><input id="result-url" type="text" readonly><button id="copy-feed" type="button" class="secondary">Copy</button></div>
         <a id="overcast-link" href="#">Add to Overcast</a>
         <p class="help">In Apple Podcasts: Library &gt; ... &gt; Follow a Show by URL. Paste your feed link there. The first episode download may take longer while the audio is generated.</p>
-        <div class="manage"><details><summary>Save your deletion key</summary><p>Keep this secret if you want to delete your mirror later. It is only shown once.</p><div class="link-row"><input id="manage-key" type="text" readonly aria-label="Private deletion key"><button id="copy-key" class="secondary" type="button">Copy</button></div><button id="delete-mirror" class="secondary" type="button">Delete this mirror</button></details></div>
+        <div class="manage"><h4>Save your deletion key</h4><p>You'll need this key to delete your feed later. It's only shown once, so copy and save it somewhere safe. The "Delete an existing feed" section below works even if you come back another day.</p><div class="link-row"><input id="manage-key" type="text" readonly aria-label="Private deletion key"><button id="copy-key" class="secondary" type="button">Copy</button></div><button id="delete-mirror" class="secondary" type="button">Delete this mirror now</button></div>
+      </section>
+      <section class="delete-existing" aria-labelledby="delete-title">
+        <h3 id="delete-title">Delete an existing feed</h3>
+        <p>Already made a feed? You can permanently remove it here, even after closing this page. <strong>Only your deletion key is needed.</strong> This also removes the feed's uploaded outro and generated episodes.</p>
+        <form id="delete-form">
+          <label class="field" for="existing-delete-key">Deletion key</label>
+          <div class="link-row">
+            <input id="existing-delete-key" name="deletion_key" type="password" autocomplete="off" spellcheck="false" required placeholder="Paste your saved deletion key" aria-describedby="delete-key-help">
+            <button class="secondary" type="button" id="show-delete-key" aria-pressed="false">Show</button>
+          </div>
+          <p id="delete-key-help" class="help">The key was supplied when the feed was created. No RSS address is needed.</p>
+          <button type="submit" class="primary-delete" id="delete-existing-button">Permanently delete feed</button>
+          <div id="delete-error" role="alert" class="error hidden"></div>
+          <div id="delete-success" role="status" class="success-note hidden">Feed successfully deleted. Its RSS link will no longer work.</div>
+        </form>
       </section>
     </section>
     <aside class="panel aside" aria-label="How it works">
@@ -207,6 +233,43 @@
       byId('error').classList.remove('hidden');
     } finally {
       button.disabled=false; button.innerHTML='Create my podcast feed <span aria-hidden="true">&#8594;</span>';
+    }
+  });
+  byId('show-delete-key').addEventListener('click', () => {
+    const input = byId('existing-delete-key');
+    const showing = input.type === 'password';
+    input.type = showing ? 'text' : 'password';
+    byId('show-delete-key').textContent = showing ? 'Hide' : 'Show';
+    byId('show-delete-key').setAttribute('aria-pressed', showing ? 'true' : 'false');
+  });
+  byId('delete-form').addEventListener('submit', async e => {
+    e.preventDefault();
+    const token = byId('existing-delete-key').value.trim();
+    byId('delete-error').classList.add('hidden');
+    byId('delete-success').classList.add('hidden');
+    if (!token || !confirm('Permanently delete this feed and its cached audio? This cannot be undone.')) return;
+    const button = byId('delete-existing-button');
+    button.disabled = true;
+    button.textContent = 'Deleting feed...';
+    try {
+      const response = await fetch('/api/manage/feed', {
+        method:'DELETE', headers:{'X-Manage-Token':token}, cache:'no-store'
+      });
+      let data = {};
+      try { data = await response.json(); } catch { /* Server may return a non-JSON error. */ }
+      if (!response.ok) throw Error(data.detail || 'Could not delete the feed');
+      if (created && created.manage_token === token) {
+        created = null;
+        byId('success').classList.add('hidden');
+      }
+      byId('existing-delete-key').value = '';
+      byId('delete-success').classList.remove('hidden');
+    } catch (err) {
+      byId('delete-error').textContent = err.message || 'Could not delete the feed';
+      byId('delete-error').classList.remove('hidden');
+    } finally {
+      button.disabled = false;
+      button.textContent = 'Permanently delete feed';
     }
   });
   byId('delete-mirror').addEventListener('click', async () => {

@@ -1,4 +1,5 @@
 import json
+import hashlib
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -72,6 +73,7 @@ def fixture_app(monkeypatch):
     monkeypatch.setattr(main, "storage_instance", fake)
     main.recent_feed_checks.clear()
     main.creation_times.clear()
+    main.deletion_times.clear()
     main.generations_today.clear()
 
     async def feed(url, *args):
@@ -231,3 +233,54 @@ def test_custom_outro_stored_independently(fixture_app):
     mid = response.json()['id']
     assert fake.get_json(f'mirrors/{mid}/meta.json')['outro_key'] == f'mirrors/{mid}/outro.mp3'
     assert f'mirrors/{mid}/outro.mp3' in fake.data
+
+
+def test_delete_using_only_new_key_after_page_reload(fixture_app):
+    fake, client = fixture_app
+    created = create(client).json()
+    mid = created["id"]
+    key = created["manage_token"]
+    assert key.startswith(mid + ".")
+    # No feed URL, mirror ID, or browser state is sent to the deletion endpoint.
+    response = client.delete("/api/manage/feed", headers={"X-Manage-Token": key})
+    assert response.status_code == 200
+    assert response.json() == {"deleted": True}
+    assert not any(k.startswith("mirrors/") or k.startswith("cache/") for k in fake.data)
+    assert client.get(f"/feed/{mid}.xml").status_code == 404
+
+
+def test_delete_with_old_key_still_works(fixture_app):
+    fake, client = fixture_app
+    created = create(client).json()
+    mid = created["id"]
+    old_key = "T" * 43  # Existing key format had no embedded mirror ID.
+    meta_key = f"mirrors/{mid}/meta.json"
+    meta = fake.get_json(meta_key)
+    meta["manage_hash"] = hashlib.sha256(old_key.encode()).hexdigest()
+    fake.put_json(meta_key, meta)
+    response = client.delete("/api/manage/feed", headers={"X-Manage-Token": old_key})
+    assert response.status_code == 200
+    assert not any(k.startswith("mirrors/") for k in fake.data)
+
+
+def test_wrong_key_cannot_delete_existing_feed(fixture_app):
+    fake, client = fixture_app
+    created = create(client).json()
+    mid = created["id"]
+    assert client.delete("/api/manage/feed").status_code == 403
+    fake_key = mid + "." + "x" * 43
+    res = client.delete("/api/manage/feed", headers={"X-Manage-Token": fake_key})
+    assert res.status_code == 403
+    assert fake.head(f"mirrors/{mid}/meta.json") is not None
+    res = client.delete("/api/manage/feed", headers={"X-Manage-Token": "z" * 43})
+    assert res.status_code == 403
+    assert fake.head(f"mirrors/{mid}/meta.json") is not None
+
+
+def test_delete_form_available_without_creating_feed(fixture_app):
+    _fake, client = fixture_app
+    page = client.get("/").text
+    assert 'id="delete-form"' in page
+    assert "Only your deletion key is needed" in page
+    assert "No RSS address is needed" in page
+    assert "'/api/manage/feed'" in page

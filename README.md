@@ -7,7 +7,7 @@ A small web app that creates on-demand podcast RSS mirrors with custom MP3 endin
 - The app periodically refreshes source RSS when a listener fetches the mirror (15-minute refresh interval by default).
 - On the first audio GET or HEAD, the app downloads the episode, appends the outro with FFmpeg, and stores the result in a **private Backblaze B2 bucket**.
 - Further requests stream the cached file through the web app with `HEAD`, `Range`, `Content-Range`, and `Content-Length` support.
-- Creators get a one-time deletion key to remove their mirror and cached audio.
+- Creators get a one-time deletion key to remove their mirror and cached audio, even after leaving the page. The website has an always-visible deletion form that needs only the saved key.
 
 ## Architecture
 
@@ -88,4 +88,4 @@ This is a **small public beta**, not yet a hardened multi-tenant production serv
 
 ## Privacy
 
-The Backblaze application key is never exposed to browsers. No account is required to create a mirror. Creator deletion keys are returned once and stored only as SHA-256 hashes in B2. Uploaded outros, RSS snapshots and generated audio stay in a private bucket; Hostless streams the requested modified episode publicly when someone has the link.
+The Backblaze application key is never exposed to browsers. No account is required to create a mirror. Creator deletion keys are returned once and stored only as SHA-256 hashes in B2. New keys embed the public mirror ID alongside a random secret so the deletion interface needs only the key; old keys remain supported via a rate-limited legacy lookup. Uploaded outros, RSS snapshots and generated audio stay in a private bucket; Hostless streams the requested modified episode publicly when someone has the link.
