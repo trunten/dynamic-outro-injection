@@ -671,6 +671,23 @@ async def admin_stats(request: Request):
     return JSONResponse(report, headers={"Cache-Control": "no-store"})
 
 
+@app.get("/api/admin/mirrors/{mid}/source")
+async def admin_source_feed(mid: str, request: Request):
+    """Reveal the original publisher RSS address to a logged-in admin only.
+
+    Some source feeds use private query parameters, so do not include URLs in
+    the bulk dashboard JSON, public APIs, or deleted-mirror history.
+    """
+    require_admin(request, settings.admin_password)
+    _id(mid, MIRROR_RE)
+    meta = await _meta(mid)
+    source_url = meta.get("feed_url")
+    if not isinstance(source_url, str) or not source_url:
+        raise HTTPException(404, "Original source URL is unavailable")
+    return JSONResponse({"source_feed_url": source_url},
+                        headers={"Cache-Control": "no-store"})
+
+
 @app.delete("/api/admin/mirrors/{mid}")
 async def admin_delete_mirror(mid: str, request: Request):
     require_admin_action(request, settings.admin_password)

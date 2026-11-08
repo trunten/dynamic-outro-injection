@@ -61,6 +61,14 @@
     .note{font-size:.78rem;color:#6b7d83;margin:11px 0 0}
     .refresh{display:flex;align-items:center;gap:8px}
     .delete-link{color:#0b7056;text-decoration:none;font-weight:700}
+    .row-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap;min-width:215px}
+    .source-toggle{font-size:.79rem;padding:8px 10px;white-space:nowrap}
+    dialog{width:min(660px,calc(100vw - 28px));max-height:90vh;overflow:auto;border:1px solid #d6e6e0;border-radius:18px;padding:24px;background:#fff;color:var(--ink);box-shadow:0 20px 80px rgba(16,28,43,.25)}
+    dialog::backdrop{background:rgba(16,28,43,.58)}
+    dialog h2{margin-bottom:5px;overflow-wrap:anywhere}
+    .source-url{display:block;width:100%;max-width:100%;font:inherit;font-size:.84rem;line-height:1.5;margin:0 0 16px;padding:11px;border:1px solid #cfdedc;border-radius:10px;background:#f8fbfa;color:var(--ink);resize:vertical;overflow-wrap:anywhere}
+    .source-controls{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+    .source-open{color:#0b7056;text-decoration:underline;font-weight:700;font-size:.84rem}
     footer{text-align:center;color:#7a8a90;font-size:.78rem;padding:8px}
     @media(max-width:700px){.scroll-hint{display:block}.top{padding:23px 18px 80px}main{padding:0 14px 32px}.panel{padding:18px}.stats{grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.stat{padding:14px}.stat strong{font-size:1.45rem}.brand a{font-size:.75rem}.sectionhead .search{max-width:none}}
   </style>
@@ -96,7 +104,7 @@
       <div id="shows-table"></div>
     </section>
     <section class="panel" aria-labelledby="active-title">
-      <div class="sectionhead"><div><h2 id="active-title">Current feeds</h2><p class="muted">Individual mirrors, their last known activity and an administrator delete option.</p></div><input id="active-search" type="search" class="search" placeholder="Search current feeds" aria-label="Search current feeds"></div>
+      <div class="sectionhead"><div><h2 id="active-title">Current feeds</h2><p class="muted">View each mirror, reveal its original publisher RSS URL for troubleshooting, or delete it.</p></div><input id="active-search" type="search" class="search" placeholder="Search current feeds" aria-label="Search current feeds"></div>
       <div id="active-table"></div>
       <p class="note">RSS requests and MP3 requests are different. A podcast app may fetch a feed or pre-download audio without anybody pressing Play.</p>
     </section>
@@ -108,6 +116,17 @@
     <div id="pending-note" class="warning hidden"></div>
     <p id="tracking-note" class="note"></p>
   </section>
+  <dialog id="source-dialog" aria-labelledby="source-dialog-title">
+    <h2 id="source-dialog-title">Original podcast RSS</h2>
+    <p class="muted">The publisher's actual RSS feed address, which may contain private access parameters. Don't share it unless you have permission.</p>
+    <label for="source-url">Original publisher RSS URL</label>
+    <textarea id="source-url" class="source-url" rows="3" readonly spellcheck="false" aria-label="Original publisher RSS URL"></textarea>
+    <div class="source-controls">
+      <button id="source-copy" class="primary" type="button">Copy URL</button>
+      <a id="source-open" class="source-open" target="_blank" rel="noopener noreferrer">Open source feed</a>
+      <button id="source-close" class="secondary" type="button">Close</button>
+    </div>
+  </dialog>
   <p id="loading" class="muted">Checking administrator session…</p>
   <footer>Dynamic Outro · private administration</footer>
 </main>
@@ -126,12 +145,55 @@ function clearError(id){const el=byId(id);el.textContent='';el.classList.add('hi
 async function api(path,options={}){const r=await fetch(path,{...options,cache:'no-store',credentials:'same-origin'});let body;try{body=await r.json();}catch{body={};}if(!r.ok){const e=new Error(typeof body.detail==='string'?body.detail:'Request failed ('+r.status+')');e.status=r.status;throw e;}return body;}
 function drawStats(){const s=report.summary;const values=[['Current feeds',s.active_feeds],['Used in last 30 days',s.active_last_30_days],['Deleted feeds',s.deleted_feeds],['RSS requests',s.rss_requests],['Audio requests',s.audio_requests],['MP3 traffic this month',fmtBytes(s.monthly_bandwidth_bytes)]];const panel=byId('stats');panel.replaceChildren();values.forEach(([label,value])=>{const box=document.createElement('div');box.className='stat';const title=document.createElement('span');title.textContent=label;const count=document.createElement('strong');count.textContent=typeof value==='number'?fmtNumber(value):value;box.append(title,count);panel.append(box);});}
 function drawShows(){const data=report.shows||[];const t=table(['Original podcast','Mirrors created','Still active','Deleted','Custom outro','Default outro'],data,(row,item)=>{td(row,item.title,item.source_host);td(row,fmtNumber(item.total));td(row,fmtNumber(item.active));td(row,fmtNumber(item.deleted));td(row,fmtNumber(item.custom_outros));td(row,fmtNumber(item.default_outros));});byId('shows-table').replaceChildren(t);}
-function drawActive(){const q=byId('active-search').value.toLowerCase().trim();const items=(report.active||[]).filter(x=>(x.title+' '+x.source_host).toLowerCase().includes(q));const t=table(['Feed','Created','Episodes','RSS requests','Audio requests','Last used','Actions'],items,(row,item)=>{td(row,item.title,item.source_host+' · '+(item.outro_choice==='default'?'Default outro':'Custom outro'));td(row,fmtDate(item.created_at));td(row,fmtNumber(item.episode_count),fmtNumber(item.generated_episode_count)+' generated');td(row,fmtNumber(item.activity?.rss_requests));td(row,fmtNumber(item.activity?.audio_requests),fmtBytes(item.activity?.audio_bytes_requested));td(row,fmtDate(item.last_activity_at));const cell=document.createElement('td');const link=document.createElement('a');link.className='delete-link';link.textContent='RSS';link.target='_blank';link.rel='noopener noreferrer';link.href='/feed/'+item.id+'.xml';const button=document.createElement('button');button.type='button';button.className='danger';button.style.marginLeft='9px';button.textContent='Delete';button.addEventListener('click',()=>deleteMirror(item));cell.append(link,button);row.append(cell);});byId('active-table').replaceChildren(t);}
+async function showOriginalRss(item,button){
+  button.disabled=true;clearError('dashboard-error');
+  try{
+    const response=await api('/api/admin/mirrors/'+item.id+'/source');
+    const url=response.source_feed_url;
+    if(typeof url!=='string'||!/^https?:\/\//i.test(url))throw new Error('Original feed URL unavailable');
+    byId('source-dialog-title').textContent='Original RSS · '+item.title;
+    byId('source-url').value=url;
+    byId('source-open').href=url;
+    byId('source-copy').textContent='Copy URL';
+    byId('source-dialog').showModal();
+  }catch(e){showError('dashboard-error','Could not load the source feed URL: '+e.message);}
+  finally{button.disabled=false;}
+}
+function drawActive(){
+  const q=byId('active-search').value.toLowerCase().trim();
+  const items=(report.active||[]).filter(x=>(x.title+' '+x.source_host).toLowerCase().includes(q));
+  const headers=['Feed','Created','Episodes','RSS requests','Audio requests','Last used','Actions'];
+  const t=table(headers,items,(row,item)=>{
+    td(row,item.title,item.source_host+' · '+(item.outro_choice==='default'?'Default outro':'Custom outro'));
+    td(row,fmtDate(item.created_at));
+    td(row,fmtNumber(item.episode_count),fmtNumber(item.generated_episode_count)+' generated');
+    td(row,fmtNumber(item.activity?.rss_requests));
+    td(row,fmtNumber(item.activity?.audio_requests),fmtBytes(item.activity?.audio_bytes_requested));
+    td(row,fmtDate(item.last_activity_at));
+    const cell=document.createElement('td');
+    const actions=document.createElement('div');actions.className='row-actions';
+    const mirror=document.createElement('a');mirror.className='delete-link';mirror.textContent='Mirror RSS';
+    mirror.target='_blank';mirror.rel='noopener noreferrer';mirror.href='/feed/'+item.id+'.xml';
+    const source=document.createElement('button');source.type='button';source.className='secondary source-toggle';
+    source.textContent='Original RSS';
+    source.addEventListener('click',()=>showOriginalRss(item,source));
+    const remove=document.createElement('button');remove.type='button';remove.className='danger';
+    remove.textContent='Delete';remove.addEventListener('click',()=>deleteMirror(item));
+    actions.append(mirror,source,remove);cell.append(actions);row.append(cell);
+  });
+  byId('active-table').replaceChildren(t);
+}
 function drawDeleted(){const q=byId('deleted-search').value.toLowerCase().trim();const items=(report.deleted||[]).filter(x=>(x.title+' '+x.source_host).toLowerCase().includes(q));const t=table(['Original podcast','Created','Deleted','Outro','Audio requests','Deleted by'],items,(row,item)=>{td(row,item.title,item.source_host);td(row,fmtDate(item.created_at));td(row,fmtDate(item.deleted_at));td(row,item.outro_choice==='default'?'Default':'Custom');td(row,fmtNumber(item.activity?.audio_requests));td(row,item.deleted_by==='administrator'?'Administrator':'Creator');});byId('deleted-table').replaceChildren(t);}
 function draw(){drawStats();drawShows();drawActive();drawDeleted();byId('tracking-note').textContent=report.tracking_note||'';byId('refreshed').textContent='Updated '+fmtDate(new Date().toISOString())+' · max '+fmtNumber(report.summary.max_mirrors)+' live feeds';const note=byId('pending-note');note.classList.toggle('hidden',!report.summary.pending_deletions);note.textContent=report.summary.pending_deletions+' feed deletion(s) incomplete. Check Backblaze and application logs before retrying.';}
 async function load(){clearError('dashboard-error');byId('reload').disabled=true;try{report=await api('/api/admin/overview');setView(true);draw();}catch(e){if(e.status===401||e.status===503){setView(false);showError('login-error',e.message);}else{showError('dashboard-error',e.message);}}finally{byId('reload').disabled=false;}}
 async function deleteMirror(item){if(!confirm('Permanently delete the mirror for "'+item.title+'" and all its cached audio? This cannot be undone.'))return;clearError('dashboard-error');try{await api('/api/admin/mirrors/'+item.id,{method:'DELETE',headers:{'X-Admin-Request':'1'}});await load();}catch(e){showError('dashboard-error','Could not delete the feed: '+e.message);}}
 byId('login-form').addEventListener('submit',async e=>{e.preventDefault();clearError('login-error');const b=byId('login-button');b.disabled=true;const pass=byId('admin-password').value;try{await api('/api/admin/login',{method:'POST',headers:{'Content-Type':'application/json','X-Admin-Request':'1'},body:JSON.stringify({password:pass})});byId('admin-password').value='';await load();}catch(e){showError('login-error',e.message);}finally{b.disabled=false;}});
+byId('source-close').addEventListener('click',()=>byId('source-dialog').close());
+byId('source-copy').addEventListener('click',async()=>{
+  const input=byId('source-url');const button=byId('source-copy');
+  try{await navigator.clipboard.writeText(input.value);button.textContent='Copied!';setTimeout(()=>{button.textContent='Copy URL';},1500);}
+  catch{input.focus();input.select();}
+});
 byId('reload').addEventListener('click',load);
 byId('active-search').addEventListener('input',()=>{if(report)drawActive();});
 byId('deleted-search').addEventListener('input',()=>{if(report)drawDeleted();});

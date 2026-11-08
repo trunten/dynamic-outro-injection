@@ -13,6 +13,10 @@ A small web app that creates on-demand podcast RSS mirrors with custom MP3 endin
 
 Hostless runs one FastAPI web app and FFmpeg in a Docker container. Backblaze B2 stores outro files, source RSS snapshots, mirror metadata and cached MP3 files; it stays **private**. One shared default outro is stored once in B2 instead of being duplicated for each new mirror. The podcast clients only see Hostless HTTPS URLs. No Hostless persistent volume or separate database is needed.
 
+### Inspect original RSS feed URLs
+
+In the password-protected `/admin` panel, choose **Original RSS** beside a current mirror. This opens the publisher's full RSS address with **Copy URL** and **Open source feed** actions to assist troubleshooting. The URL is retrieved on demand from its existing B2 metadata; the private endpoint requires an admin session and is not cached. Some RSS URLs contain access tokens in the query string, so they are omitted from public responses, the bulk admin overview and deleted-feed history.
+
 ## Hostless deployment
 
 1. Create an app from this repository, branch `main`.

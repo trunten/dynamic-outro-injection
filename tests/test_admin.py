@@ -177,3 +177,39 @@ def test_login_rate_limit(fixture_app, monkeypatch):
     assert login(client, 'wrong').status_code == 429
     main.admin_login_times.clear()
     assert login(client).status_code == 200
+
+
+def test_original_rss_url_available_to_admin_only(fixture_app, monkeypatch):
+    fake, public_client = fixture_app
+    admin = with_admin(monkeypatch)
+    made = create(admin).json()
+    mid = made['id']
+    source_endpoint = f'/api/admin/mirrors/{mid}/source'
+    assert public_client.get(source_endpoint).status_code == 401
+    assert admin.get(source_endpoint).status_code == 401
+    assert login(admin).status_code == 200
+
+    # Query strings may contain source credentials, so only the dedicated
+    # authenticated endpoint should return the exact original address.
+    url = 'https://feed.example.org/rss.xml?source-token=secret-example'
+    meta_key = f'mirrors/{mid}/meta.json'
+    meta = fake.get_json(meta_key)
+    meta['feed_url'] = url
+    fake.put_json(meta_key, meta)
+    response = admin.get(source_endpoint)
+    assert response.status_code == 200
+    assert response.json() == {'source_feed_url': url}
+    assert response.headers['cache-control'] == 'no-store'
+    assert url not in admin.get('/api/admin/overview').text
+    assert url not in public_client.get(f'/api/mirrors/{mid}').text
+
+    html = admin.get('/admin').text
+    assert 'Original RSS' in html
+    assert "'/api/admin/mirrors/'+item.id+'/source'" in html
+    assert 'Copy URL' in html and 'Open source feed' in html
+    assert admin.get('/api/admin/mirrors/not-valid/source').status_code == 404
+
+    deleted = admin.delete(f'/api/admin/mirrors/{mid}', headers={'X-Admin-Request':'1'})
+    assert deleted.status_code == 200
+    assert admin.get(source_endpoint).status_code == 404
+    assert url not in str(fake.get_json(f'system/deleted/{mid}.json'))
