@@ -49,7 +49,10 @@ class LocalAudioCache:
                 if not 0 < size <= self.max_bytes:
                     handle.close()
                     return None
-                os.utime(path, None)  # Least-recently-accessed eviction.
+                try:
+                    os.utime(path, None)  # Least-recently-accessed eviction.
+                except OSError:
+                    pass  # The already-open handle can still serve the file.
                 return handle, size
             except OSError:
                 return None
