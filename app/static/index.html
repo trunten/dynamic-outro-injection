@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#101c2b">
+  <meta name="description" content="Turn a podcast into your own feed with a custom ending. Audio is created only when requested.">
+  <title>Dynamic Outro | Your podcast, your ending.</title>
+  <style>
+    :root { color-scheme: light; --ink:#142134; --muted:#536578; --line:#dfe9ec; --mint:#baf8df; --dark:#101c2b; --teal:#0e765e; }
+    * { box-sizing:border-box }
+    body { margin:0; font-family:system-ui,-apple-system,"Segoe UI",sans-serif; background:#f3f8f7; color:var(--ink); line-height:1.55 }
+    .top { background:var(--dark); color:#fff; min-height:330px; padding:26px 22px 110px; position:relative; overflow:hidden }
+    .top::before { content:""; position:absolute; width:380px; height:380px; border:78px solid #223d47; border-radius:50%; right:-160px; top:-190px; opacity:.65 }
+    .wrap { max-width:1000px; margin:auto; position:relative }
+    .brand { display:flex; align-items:center; gap:12px; font-weight:750; letter-spacing:-.02em; font-size:1.08rem }
+    .brand-icon { display:grid; place-items:center; width:38px; height:38px; background:var(--mint); color:#124835; border-radius:12px; font-size:22px }
+    .eyebrow { text-transform:uppercase; letter-spacing:.14em; font-size:.73rem; font-weight:750; color:var(--mint); margin:52px 0 14px }
+    h1 { font-size:clamp(2.2rem,6vw,4.2rem); line-height:1.09; letter-spacing:-.05em; margin:0; font-weight:820; max-width:800px }
+    .intro { font-size:1.05rem; max-width:640px; color:#b7c9d1; margin:17px 0 0 }
+    main { margin-top:-65px !important; padding:0 22px 65px }
+    .layout { display:grid; grid-template-columns:minmax(0,1.45fr) minmax(265px,.78fr); gap:24px; align-items:start }
+    .panel { background:white; border-radius:22px; border:1px solid #e1ebe9; box-shadow:0 16px 45px rgba(16,41,40,.08); padding:28px }
+    .panel h2 { font-size:1.38rem; letter-spacing:-.035em; margin:0 0 8px }
+    .sub { color:var(--muted); font-size:.91rem; margin:0 0 26px }
+    label.field { font-weight:700; font-size:.88rem; display:block; margin:18px 0 8px }
+    input[type=url],input[type=text] { display:block; width:100%; padding:15px 15px; font:inherit; border:1px solid #cfdedc; border-radius:12px; outline:none; transition:.15s; background:#fff; color:var(--ink) }
+    input:focus { border-color:var(--teal); box-shadow:0 0 0 3px #cceee2 }
+    input::placeholder { color:#93a2aa }
+    .filebox { border:1.5px dashed #b4c9c7; border-radius:14px; background:#f7fbf9; padding:25px 18px; text-align:center; cursor:pointer; transition:.15s }
+    .filebox:hover,.filebox:focus-within { border-color:var(--teal); background:#effaf4 }
+    .file-icon { background:#e4f7ee; display:grid; place-items:center; color:#0e735c; font-size:21px; width:46px; height:46px; border-radius:12px; margin:0 auto 10px }
+    .filebox strong { font-size:.91rem; display:block }
+    .filebox small { color:#71858a; font-size:.78rem }
+    input[type=file] { position:absolute; width:1px; height:1px; opacity:0 }
+    .agreement { display:flex; gap:10px; align-items:flex-start; margin:23px 0 22px; font-size:.82rem; color:#536578 }
+    .agreement input { margin:4px 0 0; width:17px; height:17px; accent-color:#0c7b5c; flex-shrink:0 }
+    button { cursor:pointer; font:inherit; font-weight:750; border:none; border-radius:12px }
+    .primary { background:#baf8df; color:#103d32; padding:15px 22px; width:100%; font-size:.98rem; box-shadow:0 3px 0 #7dd1ae }
+    .primary:hover:not(:disabled) { background:#a8f2d3 }
+    .primary:disabled { opacity:.65; cursor:wait }
+    .secondary { background:#e9f3ef; color:#135a49; padding:10px 13px; font-size:.84rem }
+    .secondary:hover { background:#d6e9df }
+    .info { display:flex; gap:14px; margin:0 0 24px; align-items:flex-start }
+    .circle { display:grid; place-items:center; min-width:35px; width:35px; height:35px; border-radius:11px; color:#0c765e; background:#e0f6ee; font-weight:800 }
+    .info strong { display:block; font-size:.9rem; margin:1px 0 2px }
+    .info p { margin:0; color:#5f7281; font-size:.8rem; line-height:1.5 }
+    .aside h3 { margin:0 0 20px; font-size:1rem; letter-spacing:-.015em }
+    .side-note { border-top:1px solid #e7eeec; padding-top:17px; font-size:.8rem; color:#687982 }
+    .error { color:#932b28; background:#fff0ed; border:1px solid #ffc8c4; padding:12px; border-radius:10px; margin:14px 0; font-size:.87rem }
+    .hidden { display:none !important }
+    .result { background:#f0fcf5; border:1px solid #caecda; border-radius:16px; padding:21px; margin-top:20px }
+    .result h3 { margin:0 0 4px; font-size:1.08rem }
+    .result p { font-size:.85rem; color:#4d675e; margin:5px 0 15px }
+    .link-row { display:flex; gap:8px; align-items:stretch }
+    .link-row input { font-size:.81rem; min-width:0; background:white }
+    .result a { display:inline-block; margin-top:13px; color:#0b7056; font-size:.86rem; font-weight:700; text-decoration:underline }
+    .help { margin-top:16px; font-size:.77rem !important; color:#687c72 !important }
+    .manage { margin-top:18px; padding-top:13px; border-top:1px solid #d3ebdb; font-size:.79rem; color:#546b5f }
+    .manage details { margin-top:7px }
+    .manage summary { cursor:pointer; font-weight:700 }
+    .manage button { margin-top:10px }
+    footer { font-size:.77rem; color:#7a8a90; text-align:center; margin-top:36px }
+    @media (max-width:760px) { .top{min-height:330px;padding-bottom:105px} .layout{grid-template-columns:1fr} .panel{padding:22px} .eyebrow{margin-top:46px} .aside{order:2} }
+    @media (prefers-reduced-motion:reduce){*{scroll-behavior:auto!important;transition:none!important}}
+  </style>
+</head>
+<body>
+<header class="top">
+  <div class="wrap">
+    <div class="brand"><span class="brand-icon" aria-hidden="true">♫</span> Dynamic Outro</div>
+    <div class="eyebrow">Your podcast, your ending</div>
+    <h1>Give every episode<br>a little something extra.</h1>
+    <p class="intro">Choose a podcast, upload your own ending, and get a ready-to-subscribe RSS feed. We only process an episode when someone requests it.</p>
+  </div>
+</header>
+<main class="wrap">
+  <div class="layout">
+    <section class="panel" aria-labelledby="create-title">
+      <h2 id="create-title">Create your personalised feed</h2>
+      <p class="sub">A couple of details and you're on your way. No account needed.</p>
+      <form id="create-form">
+        <label class="field" for="feed-url">Original podcast RSS URL</label>
+        <input id="feed-url" name="feed_url" type="url" required placeholder="https://example.com/podcast/feed.xml" autocomplete="url" maxlength="2048">
+        <label class="field" for="outro-file">Your outro MP3</label>
+        <label class="filebox" for="outro-file">
+          <span class="file-icon" aria-hidden="true">♪</span>
+          <strong id="file-name">Choose an MP3 file</strong>
+          <small id="file-note">Up to 8 MB, maximum 10 minutes</small>
+          <input id="outro-file" name="outro" type="file" accept=".mp3,audio/mpeg" required>
+        </label>
+        <label class="agreement"><input id="permission" name="permission" type="checkbox" required><span>I have the rights or permission needed to modify and make the podcast audio available through this service.</span></label>
+        <button id="submit" class="primary" type="submit">Create my podcast feed <span aria-hidden="true">&#8594;</span></button>
+        <div id="error" role="alert" class="error hidden"></div>
+      </form>
+      <section id="success" class="result hidden" aria-live="polite">
+        <h3>It's ready!</h3>
+        <p id="success-summary"></p>
+        <label class="field" for="result-url">Your personal RSS feed</label>
+        <div class="link-row"><input id="result-url" type="text" readonly><button id="copy-feed" type="button" class="secondary">Copy</button></div>
+        <a id="overcast-link" href="#">Add to Overcast</a>
+        <p class="help">In Apple Podcasts: Library &gt; ... &gt; Follow a Show by URL. Paste your feed link there. The first episode download may take longer while the audio is generated.</p>
+        <div class="manage"><details><summary>Save your deletion key</summary><p>Keep this secret if you want to delete your mirror later. It is only shown once.</p><div class="link-row"><input id="manage-key" type="text" readonly aria-label="Private deletion key"><button id="copy-key" class="secondary" type="button">Copy</button></div><button id="delete-mirror" class="secondary" type="button">Delete this mirror</button></details></div>
+      </section>
+    </section>
+    <aside class="panel aside" aria-label="How it works">
+      <h3>How it works</h3>
+      <div class="info"><span class="circle">1</span><div><strong>Mirror the original feed</strong><p>Titles, descriptions, artwork, and episodes are carried over. No episode audio is copied yet.</p></div></div>
+      <div class="info"><span class="circle">2</span><div><strong>Attach your ending</strong><p>Your uploaded outro is stored privately, ready to append to any episode.</p></div></div>
+      <div class="info"><span class="circle">3</span><div><strong>Listen anywhere</strong><p>On first request, the episode is generated and cached for fast playback afterwards.</p></div></div>
+      <div class="side-note"><strong>Early beta</strong><p>Initial audio generation can be slow. Some podcast apps fetch episode metadata automatically, which may also trigger processing. Mirrors and daily processing are limited while we test reliability.</p><p>Mirrors are accessible to anyone with the link; they are not listed publicly. Please use only audio you have permission to modify and redistribute.</p></div>
+    </aside>
+  </div>
+  <footer>Dynamic Outro &mdash; made for podcasts with the perfect ending.</footer>
+</main>
+<script>
+  const byId = id => document.getElementById(id);
+  const form = byId('create-form');
+  let created = null;
+  byId('outro-file').addEventListener('change', e => {
+    const file = e.target.files[0];
+    byId('file-name').textContent = file ? file.name : 'Choose an MP3 file';
+    byId('file-note').textContent = file ? (file.size/1048576).toFixed(2) + ' MB selected' : 'Up to 8 MB, maximum 10 minutes';
+  });
+  async function copyField(id, button) {
+    try { await navigator.clipboard.writeText(byId(id).value); button.textContent = 'Copied!'; setTimeout(() => button.textContent='Copy',1800); }
+    catch { byId(id).focus(); byId(id).select(); }
+  }
+  byId('copy-feed').onclick = () => copyField('result-url',byId('copy-feed'));
+  byId('copy-key').onclick = () => copyField('manage-key',byId('copy-key'));
+  form.addEventListener('submit', async e => {
+    e.preventDefault();
+    const file = byId('outro-file').files[0];
+    if (!file || file.size > 8388608) {
+      byId('error').textContent = 'Choose an MP3 smaller than 8 MB.';
+      byId('error').classList.remove('hidden'); return;
+    }
+    const button = byId('submit');
+    button.disabled = true; button.textContent = 'Checking podcast and creating feed...';
+    byId('error').classList.add('hidden');
+    byId('success').classList.add('hidden');
+    try {
+      const response = await fetch('/api/mirrors',{method:'POST',body:new FormData(form)});
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || 'Could not create the mirror');
+      created = data;
+      byId('success-summary').textContent = data.title + ' - ' + data.episodes + ' episode(s) available. None have been downloaded yet.';
+      byId('result-url').value = data.feed_url;
+      byId('manage-key').value = data.manage_token;
+      byId('overcast-link').href = 'overcast://x-callback-url/add?url='+encodeURIComponent(data.feed_url);
+      byId('success').classList.remove('hidden');
+      byId('success').scrollIntoView({behavior:'smooth',block:'nearest'});
+    } catch (err) {
+      byId('error').textContent = err.message || 'Something went wrong';
+      byId('error').classList.remove('hidden');
+    } finally {
+      button.disabled=false; button.innerHTML='Create my podcast feed <span aria-hidden="true">&#8594;</span>';
+    }
+  });
+  byId('delete-mirror').addEventListener('click', async () => {
+    if (!created || !confirm('Permanently delete this mirror, its outro, and cached episodes?')) return;
+    try {
+      const response = await fetch('/api/mirrors/'+created.id,{method:'DELETE',headers:{'X-Manage-Token':created.manage_token}});
+      if (!response.ok) throw Error('Could not delete the mirror');
+      created=null; byId('success').classList.add('hidden');
+      alert('Mirror deleted.');
+    } catch(err) { alert(err.message); }
+  });
+</script>
+</body>
+</html>

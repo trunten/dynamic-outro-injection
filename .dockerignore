@@ -1,0 +1,10 @@
+.git
+.github
+.venv
+__pycache__
+.pytest_cache
+*.pyc
+.env
+*.mp3
+*.m4a
+tests
