@@ -33,6 +33,8 @@ from .rss import InvalidFeed, mirror_feed
 from .feed_source import resolve_source_feed_url
 from .security import UnsafeSource, download_episode, fetch_feed, validate_source_url
 from .storage import MissingObject, Storage
+from .local_cache import LocalAudioCache
+from .egress_quota import MonthlyEgressQuota
 
 logger = logging.getLogger("dynamic_outro")
 logging.basicConfig(level=logging.INFO)
@@ -74,6 +76,10 @@ admin_login_times: dict[str, deque] = defaultdict(deque)
 activity_tracker = ActivityTracker()
 generations_today: dict[str, int] = defaultdict(int)
 storage_instance: Storage | None = None
+# Files are ephemeral; B2 remains authoritative. The 1.5 GiB target leaves
+# headroom beneath Hostless's advertised /app/.cache capacity.
+local_audio_cache = LocalAudioCache()
+egress_quota = MonthlyEgressQuota(settings.max_monthly_egress_bytes)
 
 # Shared, administrator-provisioned audio. Kept private in B2 (not the public Git repo).
 DEFAULT_OUTRO_KEY = "atp.mp3"
@@ -412,6 +418,10 @@ async def _ensure_generated(mid: str, eid: str):
                         await s3(b2.expire_cache, "cache/", settings.cache_ttl_days,
                                  settings.max_cache_bytes, output_size)
                         await s3(b2.upload_file, output_key, output_path)
+                        # Only cache completed, successfully uploaded MP3s.
+                        # Seed before TemporaryDirectory removes the source.
+                        await asyncio.to_thread(local_audio_cache.seed, mid, eid,
+                                                output_path, output_size)
                         activity_tracker.record(mid, "generation")
                         logger.info("Generated %s/%s via %s (%d bytes)", mid, eid, method, output_size)
                     except Exception as exc:
@@ -462,24 +472,18 @@ def _range_header(header: str | None, total: int) -> tuple[str | None, int, dict
 
 
 async def _reserve_monthly_egress(amount: int) -> None:
-    """Persist a conservative approximate MP3 egress budget across restarts.
+    """Reserve outgoing byte credit conservatively in B2, in bounded chunks.
 
-    One Hostless instance is required: the S3 read/modify/write is not an atomic
-    distributed counter. It limits application traffic, not provider charges.
+    Every request still counts against the app's monthly listener quota,
+    including cache hits. Stored reservations survive restarts; unused credit
+    may be lost on a restart rather than risking an exceeded limit.
     """
-    if amount <= 0:
-        return
-    key = "system/egress-" + datetime.now(timezone.utc).strftime("%Y-%m") + ".json"
-    async with egress_gate:
-        b2 = storage()
-        try:
-            record = await s3(b2.get_json, key)
-        except MissingObject:
-            record = {"bytes": 0}
-        used = int(record.get("bytes", 0))
-        if used + amount > settings.max_monthly_egress_bytes:
-            raise HTTPException(429, "The monthly listening bandwidth limit has been reached")
-        await s3(b2.put_json, key, {"bytes": used + amount})
+    global egress_quota
+    if egress_quota.max_bytes != settings.max_monthly_egress_bytes:
+        egress_quota = MonthlyEgressQuota(settings.max_monthly_egress_bytes)
+    await egress_quota.reserve(amount, storage, s3)
+
+
 
 
 @app.api_route("/episode/{mid}/{eid}.mp3", methods=["GET", "HEAD"])
@@ -487,6 +491,25 @@ async def episode_audio(mid: str, eid: str, request: Request):
     _id(mid, MIRROR_RE)
     _id(eid, EPISODE_RE)
     try:
+        # A local hit requires no B2 HEAD or MP3 download.
+        local = await asyncio.to_thread(local_audio_cache.open, mid, eid)
+        key = f"cache/{mid}/{eid}.mp3"
+        if local is not None:
+            handle, total = local
+            try:
+                byte_range, status, headers = _range_header(request.headers.get("range"), total)
+                if request.method == "HEAD":
+                    handle.close()
+                    return Response(status_code=status, headers=headers)
+                await _reserve_monthly_egress(int(headers["Content-Length"]))
+                activity_tracker.record(mid, "audio", int(headers["Content-Length"]))
+                return StreamingResponse(local_audio_cache.stream_open(handle, byte_range),
+                                         status_code=status, media_type="audio/mpeg",
+                                         headers=headers)
+            except BaseException:
+                handle.close()
+                raise
+
         key, object_info = await _ensure_generated(mid, eid)
         total = int(object_info["ContentLength"])
         byte_range, status, headers = _range_header(request.headers.get("range"), total)
@@ -494,7 +517,12 @@ async def episode_audio(mid: str, eid: str, request: Request):
             return Response(status_code=status, headers=headers)
         await _reserve_monthly_egress(int(headers["Content-Length"]))
         activity_tracker.record(mid, "audio", int(headers["Content-Length"]))
-        return StreamingResponse(storage().stream(key, byte_range), status_code=status,
+        source = storage().stream(key, byte_range)
+        # Cache full-body streams (including full-width Range requests) only.
+        # Forward the first bytes immediately; never cache partial content.
+        full_body = byte_range is None or byte_range == f"bytes=0-{total - 1}"
+        body = local_audio_cache.tee(mid, eid, source, total) if full_body else source
+        return StreamingResponse(body, status_code=status,
                                  media_type="audio/mpeg", headers=headers)
     except HTTPException:
         raise
@@ -589,6 +617,7 @@ async def _delete_mirror_with_history(mid: str, actor: str) -> dict:
             await s3(b2.put_json, history_key, record)
         except Exception as exc:
             raise _http_error(exc) from exc
+    local_audio_cache.invalidate_mirror(mid)
     recent_feed_checks.pop(mid, None)
     activity_tracker.pending.pop(mid, None)
     return {"deleted": True}
