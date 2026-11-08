@@ -8,6 +8,7 @@ from mutagen import MutagenError
 from mutagen.id3 import (CHAP, CTOC, CTOCFlags, ID3,
                         ID3NoHeaderError, TIT2, TLEN, USLT)
 from mutagen.mp4 import MP4
+from mutagen.mp3 import MP3, BitrateMode
 
 logger = logging.getLogger("dynamic_outro.audio")
 
@@ -20,7 +21,7 @@ def probe_audio(path: str) -> dict:
     try:
         result = subprocess.run(
             ["ffprobe", "-v", "error", "-select_streams", "a:0",
-             "-show_entries", "stream=codec_name,sample_rate,channels:format=duration,format_name",
+             "-show_entries", "stream=codec_name,sample_rate,channels,bit_rate:format=duration,format_name",
              "-of", "json", path],
             capture_output=True, text=True, timeout=20, check=True,
         )
@@ -38,6 +39,36 @@ def probe_audio(path: str) -> dict:
         if isinstance(exc, AudioError):
             raise
         raise AudioError("Unsupported or damaged audio file") from exc
+
+
+
+def _is_cbr_mp3(path: str, details: dict) -> bool:
+    """Recognise CBR even for podcasts without an Info/Xing header.
+
+    A bitrate field alone isn't sufficient. Check early, middle and late MP3
+    packets when Mutagen cannot determine the encoding mode.
+    """
+    try:
+        info = MP3(path).info
+        if info.bitrate_mode == BitrateMode.CBR:
+            return True
+        if info.bitrate_mode in (BitrateMode.VBR, BitrateMode.ABR):
+            return False
+        duration = float(details["duration"])
+        middle = max(2.0, duration / 2)
+        end = max(2.0, duration - 5)
+        samples = f"2%+0.5,{middle:.3f}%+0.5,{end:.3f}%+0.5"
+        result = subprocess.run([
+            "ffprobe", "-v", "error", "-select_streams", "a:0",
+            "-read_intervals", samples,
+            "-show_entries", "packet=size", "-of", "csv=p=0", path,
+        ], capture_output=True, text=True, timeout=12, check=True)
+        sizes = [int(x) for x in result.stdout.splitlines() if x.strip().isdigit()]
+        return len(sizes) >= 15 and max(sizes) - min(sizes) <= 2
+    except (OSError, ValueError, TypeError, subprocess.TimeoutExpired,
+            subprocess.CalledProcessError, MutagenError) as exc:
+        logger.info("CBR inspection inconclusive: %s", type(exc).__name__)
+        return False
 
 
 async def _run_ffmpeg(args: list[str], timeout: int = 720) -> None:
@@ -137,7 +168,11 @@ def _preserve_episode_metadata(original_path: str, output_path: str,
 
 
 async def append_outro(original_path: str, outro_path: str, output_path: str) -> str:
-    """Fast stream-copy for compatible MP3s, transcode otherwise."""
+    """Copy compatible MP3s, bitrate-matching just the outro for CBR sources.
+
+    Matching the outro avoids mixed-bitrate MP3s with potentially inaccurate
+    seeking, without re-encoding the original podcast.
+    """
     source = await asyncio.to_thread(probe_audio, original_path)
     outro = await asyncio.to_thread(probe_audio, outro_path)
     compatible_mp3 = (
@@ -148,10 +183,26 @@ async def append_outro(original_path: str, outro_path: str, output_path: str) ->
         and "mp3" in outro.get("format_name", "")
     )
     if compatible_mp3:
+        prepared_outro = outro_path
+        src_rate = int(source.get("bit_rate") or 0)
+        if 32000 <= src_rate <= 320000 and await asyncio.to_thread(_is_cbr_mp3, original_path, source):
+            same_cbr = (src_rate == int(outro.get("bit_rate") or 0)
+                        and await asyncio.to_thread(_is_cbr_mp3, outro_path, outro))
+            if not same_cbr:
+                converted = str(Path(output_path).with_suffix(".matched-outro.mp3"))
+                try:
+                    await _run_ffmpeg([
+                        "-i", outro_path, "-map", "0:a:0", "-c:a", "libmp3lame",
+                        "-b:a", str(src_rate), "-ar", str(source["sample_rate"]),
+                        "-ac", str(source["channels"]), "-write_xing", "0", converted,
+                    ])
+                    prepared_outro = converted
+                except AudioError:
+                    logger.warning("Could not match outro bitrate; using existing join")
         list_path = str(Path(output_path).with_suffix(".ffconcat"))
         # Only filenames under our temporary directory are passed to FFmpeg.
         with open(list_path, "w", encoding="utf-8") as file:
-            for path in (original_path, outro_path):
+            for path in (original_path, prepared_outro):
                 file.write("file '" + path.replace("'", "'\\''") + "'\n")
         try:
             await _run_ffmpeg(["-f", "concat", "-safe", "0", "-i", list_path,
@@ -162,7 +213,7 @@ async def append_outro(original_path: str, outro_path: str, output_path: str) ->
                 await asyncio.to_thread(_preserve_episode_metadata, original_path,
                                         output_path, source["format_name"],
                                         source["duration"], info["duration"])
-                return "copy"
+                return "copy" if prepared_outro == outro_path else "copy-matched-cbr"
         except AudioError:
             pass
     # If input codecs differ, decode, join, and encode an MP3 with known output.
