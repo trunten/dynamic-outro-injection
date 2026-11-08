@@ -329,6 +329,7 @@ def test_local_cache_reuses_generated_audio_without_b2_reads(fixture_app, monkey
     # First GET triggers generation, B2 upload, and local seed.
     first = client.get(url)
     assert first.status_code == 200 and first.content == b"A" * 3000 + b"Z" * 1000
+    assert first.headers["x-audio-source"] == "local-cache"
     assert main.local_audio_cache.open(mid, eid) is not None
     # Even if HEAD or the stream cannot access B2, a local hit works.
     def no_b2_head_or_stream(key, *args, **kwargs):
@@ -338,6 +339,7 @@ def test_local_cache_reuses_generated_audio_without_b2_reads(fixture_app, monkey
     assert client.head(url).headers["content-length"] == "4000"
     ranged = client.get(url, headers={"Range": "bytes=3000-3999"})
     assert ranged.status_code == 206
+    assert ranged.headers["x-audio-source"] == "local-cache"
     assert ranged.headers["content-range"] == "bytes 3000-3999/4000"
     assert ranged.content == b"Z" * 1000
     assert client.get(url).content == first.content
@@ -364,6 +366,7 @@ def test_local_cache_eviction_falls_back_to_backblaze(fixture_app, monkeypatch, 
     monkeypatch.setattr(fake, "stream", instrumented_stream)
     assert client.get(url1, headers={"Range": "bytes=10-14"}).content == b"A" * 5
     assert streams == [f"cache/{first['id']}/{episode(first['id'])}.mp3"]
+    assert client.head(url1).headers['x-audio-source'] == 'backblaze'
 
 
 def test_delete_clears_local_audio_cache(fixture_app):
