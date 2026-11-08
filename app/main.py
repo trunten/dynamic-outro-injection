@@ -492,8 +492,14 @@ async def episode_audio(mid: str, eid: str, request: Request):
     _id(eid, EPISODE_RE)
     try:
         # A local hit requires no B2 HEAD or MP3 download.
+        # On a generation miss, the finished file was seeded locally before
+        # its temporary source was removed; use that copy immediately too.
         local = await asyncio.to_thread(local_audio_cache.open, mid, eid)
         key = f"cache/{mid}/{eid}.mp3"
+        object_info = None
+        if local is None:
+            key, object_info = await _ensure_generated(mid, eid)
+            local = await asyncio.to_thread(local_audio_cache.open, mid, eid)
         if local is not None:
             handle, total = local
             try:
@@ -510,7 +516,7 @@ async def episode_audio(mid: str, eid: str, request: Request):
                 handle.close()
                 raise
 
-        key, object_info = await _ensure_generated(mid, eid)
+        # Only the fallback path touches the B2 stream.
         total = int(object_info["ContentLength"])
         byte_range, status, headers = _range_header(request.headers.get("range"), total)
         if request.method == "HEAD":
