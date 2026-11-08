@@ -504,6 +504,7 @@ async def episode_audio(mid: str, eid: str, request: Request):
             handle, total = local
             try:
                 byte_range, status, headers = _range_header(request.headers.get("range"), total)
+                headers["X-Audio-Source"] = "local-cache"
                 if request.method == "HEAD":
                     handle.close()
                     return Response(status_code=status, headers=headers)
@@ -519,6 +520,7 @@ async def episode_audio(mid: str, eid: str, request: Request):
         # Only the fallback path touches the B2 stream.
         total = int(object_info["ContentLength"])
         byte_range, status, headers = _range_header(request.headers.get("range"), total)
+        headers["X-Audio-Source"] = "backblaze"
         if request.method == "HEAD":
             return Response(status_code=status, headers=headers)
         await _reserve_monthly_egress(int(headers["Content-Length"]))
