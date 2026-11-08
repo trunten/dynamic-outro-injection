@@ -164,3 +164,55 @@ def test_duration_tag_updated_without_chapters(tmp_path):
     result = ID3(out)
     assert result.getall("CHAP") == []
     assert 2800 <= int(result.getall("TLEN")[0].text[0]) <= 3300
+
+
+def test_cbr_source_with_vbr_outro_preserves_chapters_and_matches_rate(tmp_path):
+    """Only the outro is re-encoded; chapter timestamps are unchanged."""
+    from hashlib import sha256
+    from mutagen.id3 import ID3, CHAP, TIT2, USLT
+    from app.audio import _is_cbr_mp3
+    src = tmp_path / "source.mp3"
+    outro = tmp_path / "outro.mp3"
+    output = tmp_path / "finished.mp3"
+    tone(src, 4, frequency=400)
+    subprocess.run([
+        "ffmpeg", "-loglevel", "error", "-y", "-f", "lavfi",
+        "-i", "sine=frequency=750:duration=1.5:sample_rate=44100",
+        "-ac", "2", "-c:a", "libmp3lame", "-q:a", "2", str(outro),
+    ], check=True, timeout=30)
+    tags = ID3(src)
+    tags.add(CHAP(element_id="intro", start_time=0, end_time=2500,
+                  sub_frames=[TIT2(encoding=3, text=["Intro"])]))
+    tags.add(CHAP(element_id="talk", start_time=2500, end_time=0xffffffff,
+                  sub_frames=[TIT2(encoding=3, text=["Discussion"])]))
+    tags.add(USLT(encoding=3, lang="eng", desc="Transcript", text="Keep the words"))
+    tags.save(src, v2_version=3)
+    digest = sha256(src.read_bytes()).hexdigest()
+    assert _is_cbr_mp3(str(src), probe_audio(str(src)))
+    assert not _is_cbr_mp3(str(outro), probe_audio(str(outro)))
+    assert asyncio.run(append_outro(str(src), str(outro), str(output))) == "copy-matched-cbr"
+    assert probe_audio(str(output))["bit_rate"] == "128000"
+    assert _is_cbr_mp3(str(output), probe_audio(str(output)))
+    result = ID3(output)
+    chapters = sorted(result.getall("CHAP"), key=lambda ch: ch.start_time)
+    assert len(chapters) == 3
+    assert chapters[1].start_time == 2500
+    assert 3950 <= chapters[2].start_time <= 4150
+    assert result.getall("USLT")[0].text == "Keep the words"
+    assert sha256(src.read_bytes()).hexdigest() == digest
+
+
+def test_vbr_source_keeps_existing_compatible_copy_path(tmp_path):
+    """Do not mistakenly force a bitrate onto a naturally VBR original."""
+    from app.audio import _is_cbr_mp3
+    src = tmp_path / "source.mp3"
+    outro = tmp_path / "outro.mp3"
+    output = tmp_path / "finished.mp3"
+    subprocess.run([
+        "ffmpeg", "-loglevel", "error", "-y", "-f", "lavfi",
+        "-i", "sine=frequency=440:duration=3:sample_rate=44100",
+        "-ac", "2", "-c:a", "libmp3lame", "-q:a", "2", str(src),
+    ], check=True, timeout=30)
+    tone(outro, 1, frequency=700)
+    assert not _is_cbr_mp3(str(src), probe_audio(str(src)))
+    assert asyncio.run(append_outro(str(src), str(outro), str(output))) == "copy"
