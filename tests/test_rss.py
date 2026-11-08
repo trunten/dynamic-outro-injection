@@ -59,3 +59,18 @@ def test_invalid_or_non_rss_rejected():
     with pytest.raises(Exception):
         mirror_feed(b"<!DOCTYPE a [<!ENTITY e SYSTEM 'file:///etc/passwd'>]><rss>&e;</rss>",
                     "a" * 32, "https://service.example", 100, 1)
+
+
+def test_feed_larger_than_two_mib_still_accepted():
+    # Long-running shows with detailed notes can have large valid RSS documents.
+    sample = SAMPLE.replace(b"My original description.", b"A" * (3 * 1024 * 1024))
+    xml, index, title = mirror_feed(sample, "a" * 32, "https://pod.example.com", 100, 10)
+    assert title == "The Example Podcast"
+    assert len(index["episodes"]) == 2
+    assert len(xml) > 2 * 1024 * 1024
+
+
+def test_feed_over_sixteen_mib_is_rejected():
+    sample = SAMPLE.replace(b"My original description.", b"A" * (16 * 1024 * 1024))
+    with pytest.raises(InvalidFeed, match="16 MB"):
+        mirror_feed(sample, "a" * 32, "https://pod.example.com", 100, 10)

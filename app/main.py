@@ -30,6 +30,7 @@ from .admin_auth import (COOKIE_NAME, COOKIE_PATH, SESSION_TTL_SECONDS,
 from .admin_data import overview as admin_overview, source_host, source_id
 from .config import load_settings
 from .rss import InvalidFeed, mirror_feed
+from .feed_source import resolve_source_feed_url
 from .security import UnsafeSource, download_episode, fetch_feed, validate_source_url
 from .storage import MissingObject, Storage
 
@@ -272,6 +273,7 @@ async def create_mirror(request: Request):
                 raise AudioError("The outro must contain MP3 audio")
             if info["duration"] > 600:
                 raise AudioError("Outros must be no longer than 10 minutes")
+            feed_url = await resolve_source_feed_url(feed_url)
             raw = await fetch_feed(feed_url)
             mid = uuid.uuid4().hex
             base = _base_url(request)
@@ -315,7 +317,7 @@ async def _refresh_feed(mid: str) -> bytes:
     prefix = _prefix(mid)
     b2 = storage()
     async with mirror_locks[mid]:
-        cached = await s3(b2.get_bytes, prefix + "feed.xml", 2 * 1024 * 1024 + 512 * 1024)
+        cached = await s3(b2.get_bytes, prefix + "feed.xml", 20 * 1024 * 1024)
         if time.monotonic() - recent_feed_checks.get(mid, 0) < settings.feed_refresh_seconds:
             return cached
         meta = await _meta(mid)
@@ -420,7 +422,7 @@ async def _ensure_generated(mid: str, eid: str):
                 # Cache now works even if feed metadata update is interrupted.
                 try:
                     index["episodes"][eid]["cached_size"] = output_size
-                    raw = await s3(b2.get_bytes, _prefix(mid) + "original.xml", 2 * 1024 * 1024 + 1024)
+                    raw = await s3(b2.get_bytes, _prefix(mid) + "original.xml", 16 * 1024 * 1024)
                     rendered, index, _ = mirror_feed(raw, mid,
                         settings.public_base_url or meta["base_url"], meta["outro_bytes"],
                         meta["outro_seconds"], index)

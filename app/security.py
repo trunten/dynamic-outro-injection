@@ -87,7 +87,7 @@ async def open_public_url(session: aiohttp.ClientSession, url: str):
     raise UnsafeSource("Too many redirects")
 
 
-async def fetch_feed(url: str, max_bytes: int = 2 * 1024 * 1024) -> bytes:
+async def fetch_feed(url: str, max_bytes: int = 16 * 1024 * 1024) -> bytes:
     async with new_session(35) as session:
         async with open_public_url(session, url) as response:
             if int(response.headers.get("Content-Length", "0")) > max_bytes:

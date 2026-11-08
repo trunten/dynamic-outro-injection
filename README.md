@@ -44,6 +44,10 @@ The website includes a **Default (ATP End Theme)** choice, selected automaticall
 
 The file is deliberately **not committed to the public GitHub repository**. Only publish and share the default audio in a public service if you have the necessary rights to use and redistribute it. Users can still choose **Upload my own outro**, which stores a per-mirror file. Existing custom-outro mirrors remain compatible. Deleting a default mirror never deletes the shared `atp.mp3`.
 
+## Apple Podcasts links
+
+The public create form accepts both direct RSS URLs and public Apple Podcasts show URLs (for example, `https://podcasts.apple.com/gb/podcast/example/id617416468`). For Apple show links, the server extracts the show ID, looks up the publisher-provided `feedUrl` with Apple's public iTunes Lookup API, and validates that RSS document with the same audio enclosure checks used for direct feeds. The **resolved RSS URL**, not the Apple directory link, is stored for future refreshes. No episode audio is downloaded just to resolve the link. Private/subscriber-only podcasts without a public RSS feed are not supported.
+
 ## Administrator dashboard
 
 Set a strong `ADMIN_PASSWORD` environment variable on the Hostless app (keep it write-only/secret if available) and redeploy. Visit **`https://your-app-hostname/admin`**, sign in, and review:
@@ -92,7 +96,7 @@ This is a **small public beta**, not yet a hardened multi-tenant production serv
 - **Storage costs:** A private bucket avoids the B2 public-bucket creation requirement, but every stream forwarded via Hostless still downloads bytes from B2. Free allowances can change; not having a payment method on file is safer than assuming usage cannot exceed allowances.
 - **Permissions:** Use only podcast/audio content you have rights or permission to modify and make available. Mirrors are unlisted and use unguessable identifiers, but feed and audio endpoints are publicly reachable to anyone holding the URL. This app does not support private source feeds or authentication-protected podcast downloads.
 - **Episode duration:** Limited to six hours to stay within Hostless's 500 MiB temporary filesystem.
-- **Source RSS coverage:** RSS 2.0 feeds with publicly accessible audio enclosures only. Other podcast formats and unusual RSS extensions are not guaranteed to work.
+- **Source RSS coverage:** RSS 2.0 feeds up to 16 MiB with publicly accessible audio enclosures only. Other podcast formats and unusual RSS extensions are not guaranteed to work.
 
 ## File layout
 

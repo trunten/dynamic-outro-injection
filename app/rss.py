@@ -52,8 +52,8 @@ def _duration_display(seconds: int) -> str:
 
 def mirror_feed(raw: bytes, mirror_id: str, base_url: str, outro_bytes: int,
                 outro_seconds: int, previous: dict | None = None) -> tuple[bytes, dict, str]:
-    if len(raw) > 2 * 1024 * 1024:
-        raise InvalidFeed("RSS feed exceeds 2 MB")
+    if len(raw) > 16 * 1024 * 1024:
+        raise InvalidFeed("RSS feed exceeds 16 MB")
     try:
         root = SafeET.fromstring(raw)
     except (ET.ParseError, ValueError) as exc:

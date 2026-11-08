@@ -289,3 +289,30 @@ def test_delete_form_available_without_creating_feed(fixture_app):
     assert "Only your deletion key is needed" in page
     assert "No RSS address is needed" in page
     assert "'/api/manage/feed'" in page
+
+
+def test_apple_podcasts_show_link_resolves_before_mirror_creation(fixture_app, monkeypatch):
+    fake, client = fixture_app
+    seen = []
+
+    async def resolve(url):
+        seen.append(url)
+        return "https://feed.example.org/rss.xml"
+
+    monkeypatch.setattr(main, "resolve_source_feed_url", resolve)
+    response = client.post("/api/mirrors", data={
+        "feed_url": "https://podcasts.apple.com/gb/podcast/accidental-tech-podcast/id617416468",
+        "permission": "on", "outro_choice": "custom",
+    }, files={"outro": ("theme.mp3", b"x" * 2000, "audio/mpeg")})
+    assert response.status_code == 201, response.text
+    assert len(seen) == 1 and seen[0].startswith("https://podcasts.apple.com/")
+    record = fake.get_json(f"mirrors/{response.json()['id']}/meta.json")
+    assert record["feed_url"] == "https://feed.example.org/rss.xml"
+
+
+def test_website_explains_apple_podcasts_urls(fixture_app):
+    _fake, client = fixture_app
+    page = client.get("/")
+    assert page.status_code == 200
+    assert "Podcast RSS URL or Apple Podcasts link" in page.text
+    assert "find the RSS feed automatically" in page.text
