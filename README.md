@@ -6,12 +6,12 @@ A small web app that creates on-demand podcast RSS mirrors with custom MP3 endin
 - Immediately receive a private-by-obscurity mirror RSS URL. **No episode audio is downloaded during creation.**
 - The app periodically refreshes source RSS when a listener fetches the mirror (15-minute refresh interval by default).
 - On the first audio GET or HEAD, the app downloads the episode, appends the outro with FFmpeg, and stores the result in a **private Backblaze B2 bucket**.
-- Further requests stream the cached file through the web app with `HEAD`, `Range`, `Content-Range`, and `Content-Length` support.
+- Further requests are served from the Hostless ephemeral local MP3 cache when possible, falling back to Backblaze B2. `HEAD`, `Range`, `Content-Range`, and `Content-Length` support remains available.
 - Creators get a one-time deletion key to remove their mirror and cached audio, even after leaving the page. The website has an always-visible deletion form that needs only the saved key.
 
 ## Architecture
 
-Hostless runs one FastAPI web app and FFmpeg in a Docker container. Backblaze B2 stores outro files, source RSS snapshots, mirror metadata and cached MP3 files; it stays **private**. One shared default outro is stored once in B2 instead of being duplicated for each new mirror. The podcast clients only see Hostless HTTPS URLs. No Hostless persistent volume or separate database is needed.
+Hostless runs one FastAPI web app and FFmpeg in a Docker container. Backblaze B2 stores outro files, source RSS snapshots, mirror metadata and generated MP3 files; it stays **private**. One shared default outro is stored once in B2 instead of being duplicated for each new mirror. The podcast clients only see Hostless HTTPS URLs. No Hostless persistent volume or separate database is needed.
 
 ### Inspect original RSS feed URLs
 
@@ -37,6 +37,16 @@ In the password-protected `/admin` panel, choose **Original RSS** beside a curre
 7. Keep the Hostless health check as TCP initially; `/health` is also available for HTTP checks.
 
 The Backblaze application key must permit **list, read, write and delete**, including listing object versions to purge cached files. B2's S3-compatible API is used, not the Native API.
+
+### Ephemeral Hostless audio cache
+
+The app opportunistically caches recently generated or downloaded finished MP3s in `/app/.cache/episodes`, targeting **1.5 GiB** of Hostless's ephemeral cache space. Backblaze remains the permanent source of truth. No persistent volume or extra credentials are required. Cache entries are least-recently-used and may disappear during redeploys or restarts, which simply causes the app to fetch the episode from B2 again.
+
+Newly generated audio is cached only *after* its successful B2 upload. On a full MP3 fetch the first B2 stream is forwarded immediately and stored to a temporary `.part` file; an interrupted stream is never promoted into a cache hit. Small Range requests are served directly from B2 on a cache miss (without fetching the entire MP3 solely for caching). Both full and byte-range requests are served locally once an episode is cached. Deleted mirrors invalidate local entries, including any in-flight cache fill.
+
+The app's separate monthly outgoing-audio limit still applies to cached responses. Its persistent B2 quota ledger now reserves bounded chunks of future outgoing traffic, allowing repeat local requests to avoid B2 metadata reads and writes while staying conservatively below the configured cap. The counter represents **reserved bytes**, not necessarily delivered bytes; unused prepaid quota is lost on restart. It is still a one-worker beta safeguard, **not** a provider-wide bandwidth cap or a promise that network usage is free.
+
+For CBR MP3 originals with a different-bitrate outro, the app now re-encodes **only the short outro** to the original bitrate before joining without re-encoding the podcast. Original chapter timestamps, embedded transcripts, show notes and artwork are retained. This is intended to improve podcast-player seeking; actual client behavior may vary. Existing previously generated B2 episodes remain unchanged until their normal cache eviction and regeneration.
 
 ### One-time default outro setup
 
