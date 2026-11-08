@@ -2,7 +2,7 @@
 
 A small web app that creates on-demand podcast RSS mirrors with custom MP3 endings.
 
-- Paste a public podcast RSS feed and upload an MP3 outro.
+- Paste a public podcast RSS feed and choose **Default (ATP End Theme)** or upload a custom MP3 outro.
 - Immediately receive a private-by-obscurity mirror RSS URL. **No episode audio is downloaded during creation.**
 - The app periodically refreshes source RSS when a listener fetches the mirror (15-minute refresh interval by default).
 - On the first audio GET or HEAD, the app downloads the episode, appends the outro with FFmpeg, and stores the result in a **private Backblaze B2 bucket**.
@@ -11,7 +11,7 @@ A small web app that creates on-demand podcast RSS mirrors with custom MP3 endin
 
 ## Architecture
 
-Hostless runs one FastAPI web app and FFmpeg in a Docker container. Backblaze B2 stores outro files, source RSS snapshots, mirror metadata and cached MP3 files; it stays **private**. The podcast clients only see Hostless HTTPS URLs. No Hostless persistent volume or separate database is needed.
+Hostless runs one FastAPI web app and FFmpeg in a Docker container. Backblaze B2 stores outro files, source RSS snapshots, mirror metadata and cached MP3 files; it stays **private**. One shared default outro is stored once in B2 instead of being duplicated for each new mirror. The podcast clients only see Hostless HTTPS URLs. No Hostless persistent volume or separate database is needed.
 
 ## Hostless deployment
 
@@ -32,6 +32,16 @@ Hostless runs one FastAPI web app and FFmpeg in a Docker container. Backblaze B2
 7. Keep the Hostless health check as TCP initially; `/health` is also available for HTTP checks.
 
 The Backblaze application key must permit **list, read, write and delete**, including listing object versions to purge cached files. B2's S3-compatible API is used, not the Native API.
+
+### One-time default outro setup
+
+The website includes a **Default (ATP End Theme)** choice, selected automatically when available. The provided `atp.mp3` is the recommended source: the `.mov` version contains AAC audio and would require extra transcoding for typical MP3 episodes.
+
+1. In Backblaze B2, open the **existing private podcast bucket**.
+2. Upload the supplied **`atp.mp3`** file to the bucket **root**, so its exact object key is `atp.mp3` (not `folder/atp.mp3`). Leave the bucket private. It is about 1.76 MB and approximately 61 seconds long.
+3. The web page checks `/api/default-outro` and automatically enables the default selection when B2 can read that file. No extra Hostless environment variables or deploy changes are required.
+
+The file is deliberately **not committed to the public GitHub repository**. Only publish and share the default audio in a public service if you have the necessary rights to use and redistribute it. Users can still choose **Upload my own outro**, which stores a per-mirror file. Existing custom-outro mirrors remain compatible. Deleting a default mirror never deletes the shared `atp.mp3`.
 
 ## Local development
 
@@ -68,7 +78,7 @@ This is a **small public beta**, not yet a hardened multi-tenant production serv
 
 ## File layout
 
-- `app/main.py` - FastAPI handlers, mirror management, generation, quota enforcement, HTTP range proxy.
+- `app/main.py` - FastAPI handlers, shared default outro support, mirror management, generation, quota enforcement, HTTP range proxy.
 - `app/rss.py` - defensively parses and rewrites RSS feeds, preserving metadata.
 - `app/audio.py` - validates MP3s, stream-copies compatible MP3 files or transcodes with FFmpeg.
 - `app/security.py` - bounded HTTP fetching with DNS-rebinding-resistant URL resolution.

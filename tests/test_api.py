@@ -167,3 +167,67 @@ def test_website_and_health(fixture_app):
     assert page.status_code == 200
     assert "Create your personalised feed" in page.text
     assert client.get("/health").json()["storage_configured"] is True
+
+
+def test_default_outro_visibility_and_lazy_generation(fixture_app):
+    fake, client = fixture_app
+    assert client.get('/api/default-outro').json() == {
+        'label': 'Default (ATP End Theme)', 'available': False,
+    }
+    # This is an admin-provisioned object, not an upload from the public form.
+    fake.data['atp.mp3'] = b'Z' * 2048
+    assert client.get('/api/default-outro').json()['available'] is True
+
+    created = client.post('/api/mirrors', data={
+        'feed_url': 'https://feed.example.org/rss.xml',
+        'outro_choice': 'default', 'permission': 'on',
+    })
+    assert created.status_code == 201, created.text
+    mid = created.json()['id']
+    meta = fake.get_json(f'mirrors/{mid}/meta.json')
+    assert meta['outro_key'] == 'atp.mp3'
+    assert meta['outro_choice'] == 'default'
+    assert f'mirrors/{mid}/outro.mp3' not in fake.data
+    assert f'mirrors/{mid}/outro.mp3' not in fake.uploads
+    assert not any(k.startswith('cache/') for k in fake.data)
+    eid = next(iter(fake.get_json(f'mirrors/{mid}/episodes.json')['episodes']))
+    audio = client.get(f'/episode/{mid}/{eid}.mp3')
+    assert audio.status_code == 200
+    assert len(audio.content) == 4000
+    assert client.delete(f'/api/mirrors/{mid}', headers={
+        'x-manage-token': created.json()['manage_token'],
+    }).status_code == 200
+    assert 'atp.mp3' in fake.data  # Never delete the shared admin-owned audio.
+
+
+def test_default_outro_must_be_provisioned(fixture_app):
+    fake, client = fixture_app
+    response = client.post('/api/mirrors', data={
+        'feed_url': 'https://feed.example.org/rss.xml',
+        'outro_choice': 'default', 'permission': 'on',
+    })
+    assert response.status_code == 503
+    assert 'not configured' in response.json()['detail']
+    assert not any(k.startswith('mirrors/') for k in fake.data)
+
+
+def test_reject_invalid_outro_choice(fixture_app):
+    fake, client = fixture_app
+    response = client.post('/api/mirrors', data={
+        'feed_url': 'https://feed.example.org/rss.xml',
+        'outro_choice': 'raw', 'permission': 'on',
+    })
+    assert response.status_code == 422
+    assert not fake.data
+
+
+def test_custom_outro_stored_independently(fixture_app):
+    fake, client = fixture_app
+    response = client.post('/api/mirrors', data={
+        'feed_url': 'https://feed.example.org/rss.xml',
+        'outro_choice': 'custom', 'permission': 'on',
+    }, files={'outro': ('custom.mp3', b'X' * 2048, 'audio/mpeg')})
+    assert response.status_code == 201, response.text
+    mid = response.json()['id']
+    assert fake.get_json(f'mirrors/{mid}/meta.json')['outro_key'] == f'mirrors/{mid}/outro.mp3'
+    assert f'mirrors/{mid}/outro.mp3' in fake.data

@@ -27,6 +27,15 @@
     input[type=url],input[type=text] { display:block; width:100%; padding:15px 15px; font:inherit; border:1px solid #cfdedc; border-radius:12px; outline:none; transition:.15s; background:#fff; color:var(--ink) }
     input:focus { border-color:var(--teal); box-shadow:0 0 0 3px #cceee2 }
     input::placeholder { color:#93a2aa }
+    .outro-options { margin:0; padding:0; border:0; min-width:0 }
+    .outro-options legend { padding:0 }
+    .outro-option { display:flex; align-items:flex-start; gap:12px; padding:15px; margin:9px 0; border:1px solid #cfdedc; border-radius:12px; cursor:pointer; background:white }
+    .outro-option:has(input:checked) { border-color:var(--teal); background:#effaf4 }
+    .outro-option:has(input:disabled) { opacity:.55; cursor:not-allowed }
+    .outro-option input { accent-color:var(--teal); margin:4px 0 0; flex-shrink:0 }
+    .outro-option strong { display:block; font-size:.91rem }
+    .outro-option small { display:block; color:var(--muted); font-size:.78rem; margin-top:2px }
+    .outro-note { color:var(--muted); font-size:.8rem; margin:4px 0 10px }
     .filebox { border:1.5px dashed #b4c9c7; border-radius:14px; background:#f7fbf9; padding:25px 18px; text-align:center; cursor:pointer; transition:.15s }
     .filebox:hover,.filebox:focus-within { border-color:var(--teal); background:#effaf4 }
     .file-icon { background:#e4f7ee; display:grid; place-items:center; color:#0e735c; font-size:21px; width:46px; height:46px; border-radius:12px; margin:0 auto 10px }
@@ -71,7 +80,7 @@
     <div class="brand"><span class="brand-icon" aria-hidden="true">♫</span> Dynamic Outro</div>
     <div class="eyebrow">Your podcast, your ending</div>
     <h1>Give every episode<br>a little something extra.</h1>
-    <p class="intro">Choose a podcast, upload your own ending, and get a ready-to-subscribe RSS feed. We only process an episode when someone requests it.</p>
+    <p class="intro">Choose a podcast, use the default ending or upload your own, and get a ready-to-subscribe RSS feed. We only process an episode when someone requests it.</p>
   </div>
 </header>
 <main class="wrap">
@@ -82,13 +91,27 @@
       <form id="create-form">
         <label class="field" for="feed-url">Original podcast RSS URL</label>
         <input id="feed-url" name="feed_url" type="url" required placeholder="https://example.com/podcast/feed.xml" autocomplete="url" maxlength="2048">
-        <label class="field" for="outro-file">Your outro MP3</label>
-        <label class="filebox" for="outro-file">
-          <span class="file-icon" aria-hidden="true">♪</span>
-          <strong id="file-name">Choose an MP3 file</strong>
-          <small id="file-note">Up to 8 MB, maximum 10 minutes</small>
-          <input id="outro-file" name="outro" type="file" accept=".mp3,audio/mpeg" required>
-        </label>
+        <fieldset class="outro-options">
+          <legend class="field">Choose an outro</legend>
+          <label class="outro-option" for="outro-default">
+            <input id="outro-default" type="radio" name="outro_choice" value="default" checked>
+            <span><strong>Default (ATP End Theme)</strong><small>Ready-made, approximately 1 minute long</small></span>
+          </label>
+          <label class="outro-option" for="outro-custom">
+            <input id="outro-custom" type="radio" name="outro_choice" value="custom">
+            <span><strong>Upload my own outro</strong><small>MP3, up to 8 MB and 10 minutes</small></span>
+          </label>
+        </fieldset>
+        <p class="outro-note" id="default-status" role="status">Checking default outro availability…</p>
+        <div id="custom-upload" class="hidden">
+          <label class="field" for="outro-file">Your custom outro MP3</label>
+          <label class="filebox" for="outro-file">
+            <span class="file-icon" aria-hidden="true">♪</span>
+            <strong id="file-name">Choose an MP3 file</strong>
+            <small id="file-note">Up to 8 MB, maximum 10 minutes</small>
+            <input id="outro-file" name="outro" type="file" accept=".mp3,audio/mpeg">
+          </label>
+        </div>
         <label class="agreement"><input id="permission" name="permission" type="checkbox" required><span>I have the rights or permission needed to modify and make the podcast audio available through this service.</span></label>
         <button id="submit" class="primary" type="submit">Create my podcast feed <span aria-hidden="true">&#8594;</span></button>
         <div id="error" role="alert" class="error hidden"></div>
@@ -106,7 +129,7 @@
     <aside class="panel aside" aria-label="How it works">
       <h3>How it works</h3>
       <div class="info"><span class="circle">1</span><div><strong>Mirror the original feed</strong><p>Titles, descriptions, artwork, and episodes are carried over. No episode audio is copied yet.</p></div></div>
-      <div class="info"><span class="circle">2</span><div><strong>Attach your ending</strong><p>Your uploaded outro is stored privately, ready to append to any episode.</p></div></div>
+      <div class="info"><span class="circle">2</span><div><strong>Attach your ending</strong><p>Choose the default theme or upload a custom MP3. Both are kept in private storage.</p></div></div>
       <div class="info"><span class="circle">3</span><div><strong>Listen anywhere</strong><p>On first request, the episode is generated and cached for fast playback afterwards.</p></div></div>
       <div class="side-note"><strong>Early beta</strong><p>Initial audio generation can be slow. Some podcast apps fetch episode metadata automatically, which may also trigger processing. Mirrors and daily processing are limited while we test reliability.</p><p>Mirrors are accessible to anyone with the link; they are not listed publicly. Please use only audio you have permission to modify and redistribute.</p></div>
     </aside>
@@ -117,6 +140,32 @@
   const byId = id => document.getElementById(id);
   const form = byId('create-form');
   let created = null;
+  function updateOutroChoice() {
+    const custom = byId('outro-custom').checked;
+    byId('custom-upload').classList.toggle('hidden', !custom);
+    byId('outro-file').required = custom;
+  }
+  byId('outro-default').addEventListener('change', updateOutroChoice);
+  byId('outro-custom').addEventListener('change', updateOutroChoice);
+  updateOutroChoice();
+  fetch('/api/default-outro', {cache:'no-store'}).then(async response => {
+    if (!response.ok) throw new Error('Default outro unavailable');
+    return response.json();
+  }).then(status => {
+    if (status.available) {
+      byId('default-status').textContent = 'Default theme is ready to use.';
+    } else {
+      byId('outro-default').disabled = true;
+      byId('outro-custom').checked = true;
+      byId('default-status').textContent = 'Default theme is not configured yet. Please upload your own MP3.';
+      updateOutroChoice();
+    }
+  }).catch(() => {
+    byId('outro-default').disabled = true;
+    byId('outro-custom').checked = true;
+    byId('default-status').textContent = 'Could not check the default theme. You can still upload your own MP3.';
+    updateOutroChoice();
+  });
   byId('outro-file').addEventListener('change', e => {
     const file = e.target.files[0];
     byId('file-name').textContent = file ? file.name : 'Choose an MP3 file';
@@ -130,8 +179,9 @@
   byId('copy-key').onclick = () => copyField('manage-key',byId('copy-key'));
   form.addEventListener('submit', async e => {
     e.preventDefault();
+    const isCustom = byId('outro-custom').checked;
     const file = byId('outro-file').files[0];
-    if (!file || file.size > 8388608) {
+    if (isCustom && (!file || file.size > 8388608)) {
       byId('error').textContent = 'Choose an MP3 smaller than 8 MB.';
       byId('error').classList.remove('hidden'); return;
     }
@@ -140,7 +190,9 @@
     byId('error').classList.add('hidden');
     byId('success').classList.add('hidden');
     try {
-      const response = await fetch('/api/mirrors',{method:'POST',body:new FormData(form)});
+      const payload = new FormData(form);
+      if (!isCustom) payload.delete('outro');
+      const response = await fetch('/api/mirrors',{method:'POST',body:payload});
       const data = await response.json();
       if (!response.ok) throw new Error(data.detail || 'Could not create the mirror');
       created = data;

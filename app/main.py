@@ -44,6 +44,10 @@ creation_times: dict[str, deque] = defaultdict(deque)
 generations_today: dict[str, int] = defaultdict(int)
 storage_instance: Storage | None = None
 
+# Shared, administrator-provisioned audio. Kept private in B2 (not the public Git repo).
+DEFAULT_OUTRO_KEY = "atp.mp3"
+DEFAULT_OUTRO_LABEL = "Default (ATP End Theme)"
+
 
 def storage() -> Storage:
     global storage_instance
@@ -117,6 +121,19 @@ async def health():
     return {"ok": True, "storage_configured": settings.storage_ready}
 
 
+@app.get("/api/default-outro")
+async def default_outro_status():
+    """Tell the UI whether the privately stored shared outro is ready to use."""
+    if not settings.storage_ready:
+        return {"label": DEFAULT_OUTRO_LABEL, "available": False}
+    try:
+        record = await s3(storage().head, DEFAULT_OUTRO_KEY)
+    except Exception as exc:
+        raise _http_error(exc) from exc
+    available = bool(record and 1024 <= int(record["ContentLength"]) <= settings.max_outro_bytes)
+    return {"label": DEFAULT_OUTRO_LABEL, "available": available}
+
+
 def _limit_creation(request: Request) -> None:
     ip = request.client.host if request.client else "unknown"
     now = time.monotonic()
@@ -136,18 +153,22 @@ async def create_mirror(request: Request):
         raise HTTPException(413, "Uploaded file is too large")
     _limit_creation(request)
     try:
-        form = await request.form(max_files=1, max_fields=3)
+        form = await request.form(max_files=1, max_fields=4)
     except Exception as exc:
         raise HTTPException(400, "Invalid upload form") from exc
     feed_url = str(form.get("feed_url", "")).strip()
     agreed = str(form.get("permission", "")).lower() in ("on", "yes", "true", "1")
+    choice = str(form.get("outro_choice", "custom")).strip().lower()
     outro = form.get("outro")
     if not agreed:
         raise HTTPException(422, "Please confirm that you have permission to modify and host the audio")
-    if not outro or not hasattr(outro, "read"):
-        raise HTTPException(422, "Choose an MP3 outro file")
-    if not (getattr(outro, "filename", "") or "").lower().endswith(".mp3"):
-        raise HTTPException(422, "The outro must be an MP3 file")
+    if choice not in ("default", "custom"):
+        raise HTTPException(422, "Select the default outro or upload your own MP3")
+    if choice == "custom":
+        if not outro or not hasattr(outro, "read"):
+            raise HTTPException(422, "Choose an MP3 outro file")
+        if not (getattr(outro, "filename", "") or "").lower().endswith(".mp3"):
+            raise HTTPException(422, "The outro must be an MP3 file")
     try:
         validate_source_url(feed_url)
     except UnsafeSource as exc:
@@ -160,15 +181,29 @@ async def create_mirror(request: Request):
 
     with tempfile.TemporaryDirectory(prefix="outro-", dir="/tmp") as folder:
         outro_path = os.path.join(folder, "outro.mp3")
-        size = 0
-        with open(outro_path, "wb") as file:
-            while chunk := await outro.read(64 * 1024):
-                size += len(chunk)
-                if size > settings.max_outro_bytes:
-                    raise HTTPException(413, "Outro exceeds the 8 MB limit")
-                file.write(chunk)
-        if size < 1024:
-            raise HTTPException(422, "Outro file is empty")
+        if choice == "default":
+            try:
+                record = await s3(b2.head, DEFAULT_OUTRO_KEY)
+                if not record:
+                    raise HTTPException(503, "Default outro is not configured yet; please upload your own MP3")
+                size = int(record["ContentLength"])
+                if not 1024 <= size <= settings.max_outro_bytes:
+                    raise HTTPException(503, "Default outro is not a valid size")
+                await s3(b2.download_file, DEFAULT_OUTRO_KEY, outro_path)
+            except HTTPException:
+                raise
+            except Exception as exc:
+                raise _http_error(exc) from exc
+        else:
+            size = 0
+            with open(outro_path, "wb") as file:
+                while chunk := await outro.read(64 * 1024):
+                    size += len(chunk)
+                    if size > settings.max_outro_bytes:
+                        raise HTTPException(413, "Outro exceeds the 8 MB limit")
+                    file.write(chunk)
+            if size < 1024:
+                raise HTTPException(422, "Outro file is empty")
         try:
             info = await asyncio.to_thread(probe_audio, outro_path)
             if info["codec_name"] != "mp3":
@@ -180,6 +215,7 @@ async def create_mirror(request: Request):
             base = _base_url(request)
             rendered, index, title = mirror_feed(raw, mid, base, size, round(info["duration"]))
             token = secrets.token_urlsafe(32)
+            prefix = _prefix(mid)
             meta = {
                 "feed_url": feed_url,
                 "title": title,
@@ -187,11 +223,13 @@ async def create_mirror(request: Request):
                 "original_sha256": hashlib.sha256(raw).hexdigest(),
                 "outro_bytes": size,
                 "outro_seconds": round(info["duration"]),
+                "outro_key": DEFAULT_OUTRO_KEY if choice == "default" else prefix + "outro.mp3",
+                "outro_choice": choice,
                 "base_url": base,
                 "manage_hash": hashlib.sha256(token.encode()).hexdigest(),
             }
-            prefix = _prefix(mid)
-            await s3(b2.upload_file, prefix + "outro.mp3", outro_path)
+            if choice == "custom":
+                await s3(b2.upload_file, prefix + "outro.mp3", outro_path)
             await s3(b2.put_bytes, prefix + "original.xml", raw, "application/xml")
             await s3(b2.put_json, prefix + "episodes.json", index)
             await s3(b2.put_bytes, prefix + "feed.xml", rendered, "application/rss+xml")
@@ -292,7 +330,9 @@ async def _ensure_generated(mid: str, eid: str):
                     source_details = await asyncio.to_thread(probe_audio, src_path)
                     if source_details["duration"] > 6 * 3600:
                         raise AudioError("Episodes longer than six hours are not supported")
-                    await s3(b2.download_file, _prefix(mid) + "outro.mp3", outro_path)
+                    # Pre-existing mirrors have no outro_key: keep their original custom file.
+                    outro_key = meta.get("outro_key") or _prefix(mid) + "outro.mp3"
+                    await s3(b2.download_file, outro_key, outro_path)
                     method = await append_outro(src_path, outro_path, output_path)
                     output_size = os.path.getsize(output_path)
                     if not output_size:
