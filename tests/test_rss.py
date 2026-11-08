@@ -74,3 +74,22 @@ def test_feed_over_sixteen_mib_is_rejected():
     sample = SAMPLE.replace(b"My original description.", b"A" * (16 * 1024 * 1024))
     with pytest.raises(InvalidFeed, match="16 MB"):
         mirror_feed(sample, "a" * 32, "https://pod.example.com", 100, 10)
+
+
+def test_preserves_linked_rss_chapters_and_transcripts():
+    from defusedxml import ElementTree as SafeET
+    feed = b'''<rss version="2.0" xmlns:podcast="https://podcastindex.org/namespace/1.0">
+<channel><title>Linked resources</title><item><guid>1</guid>
+<enclosure url="https://audio.example.org/test.mp3" type="audio/mpeg" length="1000" />
+<podcast:chapters url="https://audio.example.org/chapters.json" type="application/json+chapters" />
+<podcast:transcript url="https://audio.example.org/episode.vtt" type="text/vtt" language="en" />
+</item></channel></rss>'''
+    result, _, _ = mirror_feed(feed, "c" * 32, "https://mirror.example.org", 2000, 60)
+    root = SafeET.fromstring(result)
+    item = root.find("channel/item")
+    ns = "{https://podcastindex.org/namespace/1.0}"
+    assert item.find(f"{ns}chapters").get("url") == "https://audio.example.org/chapters.json"
+    transcript = item.find(f"{ns}transcript")
+    assert transcript.get("url") == "https://audio.example.org/episode.vtt"
+    assert transcript.get("type") == "text/vtt"
+    assert transcript.get("language") == "en"
