@@ -60,3 +60,88 @@ def test_dns_resolver_blocks_private_ip():
         await resolver.close()
 
     asyncio.run(run())
+
+
+
+def test_signed_libsyn_redirect_keeps_original_query_escapes():
+    """CDN signatures can cover the URL's exact percent-encoded query bytes."""
+    import asyncio
+    from yarl import URL
+    from app.security import open_public_url
+
+    original = "https://traffic.libsyn.com/example/atp716.mp3"
+    signed = (
+        "https://content.libsyn.com/p/7/c/b/atp716.mp3"
+        "?c_id=208579579&response-content-type=audio%2Fmpeg"
+        "&Expires=1794146855&Signature=x~Y%2Bz&Key-Pair-Id=K123"
+    )
+    # Demonstrate the failure this guards against: default URL processing
+    # converts the signed query to a different URL.
+    assert str(URL(signed)) != signed
+
+    class FakeResponse:
+        def __init__(self, status, headers):
+            self.status = status
+            self.headers = headers
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        def raise_for_status(self):
+            assert self.status == 200
+
+    class FakeSession:
+        def __init__(self):
+            self.calls = []
+
+        def get(self, url, **kwargs):
+            self.calls.append((url, kwargs))
+            if len(self.calls) == 1:
+                return FakeResponse(302, {"Location": signed})
+            return FakeResponse(200, {})
+
+    async def run():
+        session = FakeSession()
+        async with open_public_url(session, original) as response:
+            assert response.status == 200
+        assert len(session.calls) == 2
+        assert all(k["allow_redirects"] is False for _, k in session.calls)
+        assert isinstance(session.calls[1][0], URL)
+        assert str(session.calls[1][0]) == signed
+
+    asyncio.run(run())
+
+
+def test_signed_url_preservation_does_not_allow_unsafe_redirect():
+    import asyncio
+    from app.security import open_public_url
+
+    class Redirect:
+        status = 302
+        headers = {"Location": "http://127.0.0.1/internal"}
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+    class FakeSession:
+        def __init__(self):
+            self.calls = 0
+
+        def get(self, url, **kwargs):
+            self.calls += 1
+            return Redirect()
+
+    async def run():
+        session = FakeSession()
+        with pytest.raises(UnsafeSource):
+            async with open_public_url(session, "https://traffic.libsyn.com/episode.mp3"):
+                pass
+        assert session.calls == 1
+
+    asyncio.run(run())

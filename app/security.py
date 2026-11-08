@@ -10,6 +10,7 @@ from urllib.parse import urljoin, urlsplit
 
 import aiohttp
 from aiohttp.abc import AbstractResolver
+from yarl import URL
 
 
 class UnsafeSource(ValueError):
@@ -74,7 +75,11 @@ def new_session(total_timeout: int = 120) -> aiohttp.ClientSession:
 async def open_public_url(session: aiohttp.ClientSession, url: str):
     current = validate_source_url(url)
     for _ in range(6):
-        async with session.get(current, allow_redirects=False) as response:
+        # Signed CDN redirect URLs are byte-sensitive: ordinary aiohttp URL
+        # canonicalisation changes audio%2Fmpeg into audio/mpeg and can
+        # invalidate the signature. Keep original escapes unchanged.
+        # Public IP validation still runs on every redirect hop.
+        async with session.get(URL(current, encoded=True), allow_redirects=False) as response:
             if response.status in (301, 302, 303, 307, 308):
                 target = response.headers.get("Location")
                 if not target:
