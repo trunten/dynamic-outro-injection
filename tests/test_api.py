@@ -64,13 +64,15 @@ class FakeB2:
 
 
 @pytest.fixture
-def fixture_app(monkeypatch):
+def fixture_app(monkeypatch, tmp_path):
     fake = FakeB2()
     monkeypatch.setattr(main, "settings", replace(main.settings, bucket="test",
                         endpoint="https://s3.eu-central-003.backblazeb2.com",
                         key_id="test", secret="test", max_mirrors=20,
                         public_base_url="https://mirror.example.org"))
     monkeypatch.setattr(main, "storage_instance", fake)
+    monkeypatch.setattr(main, "local_audio_cache", main.LocalAudioCache(str(tmp_path / "cache"), 16 * 1024 * 1024))
+    monkeypatch.setattr(main, "egress_quota", main.MonthlyEgressQuota(main.settings.max_monthly_egress_bytes))
     main.recent_feed_checks.clear()
     main.creation_times.clear()
     main.deletion_times.clear()
@@ -316,3 +318,63 @@ def test_website_explains_apple_podcasts_urls(fixture_app):
     assert page.status_code == 200
     assert "Podcast RSS URL or Apple Podcasts link" in page.text
     assert "find the RSS feed automatically" in page.text
+
+
+def test_local_cache_reuses_generated_audio_without_b2_reads(fixture_app, monkeypatch):
+    fake, client = fixture_app
+    created = create(client).json()
+    mid = created["id"]
+    eid = next(iter(fake.get_json(f"mirrors/{mid}/episodes.json")["episodes"]))
+    url = f"/episode/{mid}/{eid}.mp3"
+    # First GET triggers generation, B2 upload, and local seed.
+    first = client.get(url)
+    assert first.status_code == 200 and first.content == b"A" * 3000 + b"Z" * 1000
+    assert main.local_audio_cache.open(mid, eid) is not None
+    # Even if HEAD or the stream cannot access B2, a local hit works.
+    def no_b2_head_or_stream(key, *args, **kwargs):
+        raise AssertionError("Cache hit should not query Backblaze")
+    monkeypatch.setattr(fake, "head", no_b2_head_or_stream)
+    monkeypatch.setattr(fake, "stream", no_b2_head_or_stream)
+    assert client.head(url).headers["content-length"] == "4000"
+    ranged = client.get(url, headers={"Range": "bytes=3000-3999"})
+    assert ranged.status_code == 206
+    assert ranged.headers["content-range"] == "bytes 3000-3999/4000"
+    assert ranged.content == b"Z" * 1000
+    assert client.get(url).content == first.content
+
+
+def test_local_cache_eviction_falls_back_to_backblaze(fixture_app, monkeypatch, tmp_path):
+    fake, client = fixture_app
+    monkeypatch.setattr(main, "local_audio_cache",
+                        main.LocalAudioCache(str(tmp_path / "smallcache"), 4500))
+    first = create(client).json()
+    second = create(client).json()
+    def episode(mid):
+        return next(iter(fake.get_json(f"mirrors/{mid}/episodes.json")["episodes"]))
+    url1 = f"/episode/{first['id']}/{episode(first['id'])}.mp3"
+    url2 = f"/episode/{second['id']}/{episode(second['id'])}.mp3"
+    assert client.get(url1).status_code == 200
+    assert client.get(url2).status_code == 200
+    assert main.local_audio_cache.open(first["id"], episode(first["id"])) is None
+    streams = []
+    original_stream = fake.stream
+    def instrumented_stream(key, byte_range=None):
+        streams.append(key)
+        return original_stream(key, byte_range)
+    monkeypatch.setattr(fake, "stream", instrumented_stream)
+    assert client.get(url1, headers={"Range": "bytes=10-14"}).content == b"A" * 5
+    assert streams == [f"cache/{first['id']}/{episode(first['id'])}.mp3"]
+
+
+def test_delete_clears_local_audio_cache(fixture_app):
+    fake, client = fixture_app
+    created = create(client).json()
+    mid = created["id"]
+    eid = next(iter(fake.get_json(f"mirrors/{mid}/episodes.json")["episodes"]))
+    url = f"/episode/{mid}/{eid}.mp3"
+    assert client.get(url).status_code == 200
+    assert main.local_audio_cache.open(mid, eid) is not None
+    assert client.delete(f"/api/mirrors/{mid}",
+                         headers={"x-manage-token": created["manage_token"]}).status_code == 200
+    assert main.local_audio_cache.open(mid, eid) is None
+    assert client.get(url).status_code == 404
